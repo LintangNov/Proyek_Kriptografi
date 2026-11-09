@@ -10,6 +10,8 @@ Catatan Kepatuhan Regulasi Kode:
 - Dilarang menggunakan karakter em dash pada seluruh teks, label, dan komentar (Aturan R-02).
 """
 
+import hashlib
+import hmac
 import json
 import os
 from datetime import datetime, timezone
@@ -249,6 +251,18 @@ class Blockchain:
 # Pembuatan dan Verifikasi Paket Dokumen (.vault)
 # =====================================================================
 
+def compute_vault_mac(vault_package: Dict[str, Any], k1: bytes, k2: bytes) -> str:
+    """
+    HMAC-SHA256 atas seluruh isi paket, dengan kunci turunan passphrase.
+    Tanpa passphrase, judul, kategori, pengirim, dan sertifikat tidak bisa diubah
+    tanpa terdeteksi, walaupun blok dihitung ulang.
+    """
+    fields = {k: vault_package[k] for k in ("vault_version", "export_salt", "metadata", "encrypted_payload", "blockchain_certificate")}
+    canonical = json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    mac_key = hashlib.sha256(b"AegisVault-Vault-MAC-v1" + k1 + k2).digest()
+    return hmac.new(mac_key, canonical, hashlib.sha256).hexdigest()
+
+
 def package_vault_file(
     doc_uuid: str,
     author: str,
@@ -281,7 +295,7 @@ def package_vault_file(
     created_timestamp = created_at if created_at else get_current_utc_timestamp()
 
     vault_package = {
-        "vault_version": "1.0",
+        "vault_version": "1.1",
         "export_salt": export_salt.hex(),
         "metadata": {
             "doc_uuid": doc_uuid,
@@ -302,6 +316,7 @@ def package_vault_file(
             "block_hash": block["block_hash"]
         }
     }
+    vault_package["integrity_mac"] = compute_vault_mac(vault_package, k1, k2)
     return vault_package
 
 
@@ -360,7 +375,8 @@ def import_and_verify_vault(
         }
 
     # Validasi Field Wajib
-    required_fields = ["vault_version", "export_salt", "metadata", "encrypted_payload", "blockchain_certificate"]
+    # integrity_mac wajib ada: kalau boleh kosong, penyerang tinggal menghapusnya.
+    required_fields = ["vault_version", "export_salt", "metadata", "encrypted_payload", "blockchain_certificate", "integrity_mac"]
     for field in required_fields:
         if field not in vault_data:
             return {
@@ -438,6 +454,17 @@ def import_and_verify_vault(
             "valid": False,
             "status": "TAMPERED_CERTIFICATE",
             "message": f"PERINGATAN: SERTIFIKAT BLOCKCHAIN TIDAK MEMENUHI PROOF-OF-WORK (wajib diawali '{POW_DIFFICULTY_PREFIX}').",
+            "decrypted_content": decrypted_content,
+            "metadata": vault_data.get("metadata"),
+            "certificate": cert
+        }
+
+    # Verifikasi seluruh isi paket dengan kunci turunan passphrase
+    if not hmac.compare_digest(str(vault_data["integrity_mac"]), compute_vault_mac(vault_data, k1, k2)):
+        return {
+            "valid": False,
+            "status": "TAMPERED_PACKAGE",
+            "message": "PERINGATAN: ISI PAKET BERUBAH SETELAH DIEKSPOR! Judul, kategori, pengirim, atau sertifikat tidak cocok dengan kode integritas paket.",
             "decrypted_content": decrypted_content,
             "metadata": vault_data.get("metadata"),
             "certificate": cert

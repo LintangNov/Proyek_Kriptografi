@@ -50,7 +50,8 @@ const fmtInt = (n) => new Intl.NumberFormat("id-ID").format(n);
 
 const blankLogin = () => ({ username: "", pin: "", error: "", usernameError: "" });
 const blankReg = () => ({ username: "", full_name: "", pin: "", photo: null, cam: "idle", errors: {}, busy: false, formError: "" });
-const blankMemo = () => ({ items: null, loading: false, error: "", selId: null, detail: null, detailLoading: false, detailError: "", compose: false, saving: false, form: { title: "", category: "Rahasia", content: "" }, errors: {} });
+const blankReplace = () => ({ username: "", pin: "", photo: null, cam: "idle", errors: {}, busy: false, formError: "" });
+const blankMemo = () => ({ items: null, loading: false, error: "", selId: null, detail: null, detailLoading: false, detailError: "", compose: false, saving: false, form: { title: "", category: "", content: "" }, errors: {} });
 const blankVault = () => ({ items: null, loading: false, error: "", uploading: null, uploadError: "", drag: false, downloading: null });
 const blankCourier = () => ({ file: null, pass: "", state: "idle", fileError: "", passError: "", result: null, drag: false });
 const blankStego = () => ({ cover: null, coverUrl: "", coverW: 0, coverH: 0, coverError: "", msg: "", pass: "", busy: false, embedError: "", done: false, stego: null, stegoError: "", xPass: "", xBusy: false, xResult: null, xError: "", dragA: false, dragB: false });
@@ -68,6 +69,8 @@ const S = {
   login: blankLogin(),
   face: { state: "ready", error: "", busy: false },
   reg: blankReg(),
+  replace: blankReplace(),
+  restore: { busy: false, error: "" },
   memo: blankMemo(),
   vault: blankVault(),
   courier: blankCourier(),
@@ -229,10 +232,43 @@ function viewDongle() {
   const wrong = d.connected && !d.valid;
   const e = S.enroll;
   const err = e.error ? `<p class="field-error" role="alert">${esc(e.error)}</p>` : "";
-  const content = wrong
-    ? `<div class="space-y-6">${iconTile("usb", "bg-bad-bg text-bad-text")}<div><h1 class="text-display">USB ini belum terdaftar</h1><p class="mt-2 text-reading text-ink2">${esc(d.reason || "Tancapkan dongle yang benar, atau daftarkan USB ini.")}</p></div><div>${button("secondary", "Daftarkan USB ini sebagai dongle", { icon: "usb", action: "enroll", loading: e.busy })}${err}</div></div>`
-    : `<div class="space-y-6">${iconTile("usb", "bg-muted text-amber-800")}<div><h1 class="text-display">Tancapkan USB dongle</h1><p class="mt-2 text-reading text-ink2">AegisVault tetap terkunci sampai dongle terdaftar terdeteksi.</p></div>${badge("bad", "Dongle belum terdeteksi")}<div class="space-y-3 rounded-2xl bg-canvas p-5"><h2 class="text-body font-semibold">Pertama kali memakai AegisVault?</h2><p class="text-body text-ink2">Tancapkan flashdisk, lalu daftarkan sebagai dongle. Aplikasi menulis file dongle.key ke flashdisk tersebut.</p>${button("secondary", "Daftarkan USB ini sebagai dongle", { icon: "usb", action: "enroll", loading: e.busy })}${err}</div></div>`;
-  return authShell([wrong ? "fail" : "active", "wait", "wait"], content);
+  let next;
+  if (d.can_enroll) {
+    next = `<div class="space-y-3 rounded-2xl bg-canvas p-5"><h2 class="text-body font-semibold">Pertama kali memakai AegisVault?</h2><p class="text-body text-ink2">Tancapkan flashdisk, lalu daftarkan sebagai dongle. Setelah itu, komputer ini hanya menerima dongle tersebut.</p>${button("secondary", "Daftarkan USB ini sebagai dongle", { icon: "usb", action: "enroll", loading: e.busy })}${err}</div>`;
+  } else {
+    next = `<div class="space-y-3 rounded-2xl bg-canvas p-5"><h2 class="text-body font-semibold">Dongle hilang atau rusak?</h2><p class="text-body text-ink2">Ganti dengan flashdisk baru memakai akun staf. Dongle lama langsung tidak berlaku.</p>${button("secondary", "Ganti dongle", { icon: "usb", action: "go-replace" })}</div>`;
+  }
+  const head = wrong
+    ? `${iconTile("usb", "bg-bad-bg text-bad-text")}<div><h1 class="text-display">USB ini belum terdaftar</h1><p class="mt-2 text-reading text-ink2">${esc(d.reason || "Tancapkan dongle yang terdaftar di komputer ini.")}</p></div>`
+    : `${iconTile("usb", "bg-muted text-amber-800")}<div><h1 class="text-display">Tancapkan USB dongle</h1><p class="mt-2 text-reading text-ink2">AegisVault tetap terkunci sampai dongle terdaftar terdeteksi.</p></div>${badge("bad", "Dongle belum terdeteksi")}`;
+  return authShell([wrong ? "fail" : "active", "wait", "wait"], `<div class="space-y-6">${head}${next}</div>`);
+}
+
+function viewReplace() {
+  const r = S.replace;
+  const photoErr = r.errors.photo ? `<p class="field-error" role="alert">${esc(r.errors.photo)}</p>` : "";
+  const camera = r.cam === "nocam"
+    ? `<div class="flex aspect-[4/3] items-center justify-center rounded-[20px] bg-muted p-4 text-center text-body text-ink2">Kamera tidak terdeteksi. Sambungkan webcam, lalu coba lagi.</div>${button("secondary", "Periksa kamera lagi", { action: "replace-camera", cls: "w-full" })}${testUpload("replace-upload")}`
+    : `${cameraBox(r.photo ? "pass" : "ready", r.photo)}${r.photo ? button("secondary", "Ambil ulang foto", { action: "replace-retake", cls: "w-full" }) : button("secondary", "Ambil foto wajah", { icon: "wajah", action: "replace-capture", cls: "w-full" })}`;
+  return authShell(["active", "wait", "wait"], `
+    <form class="space-y-6" data-submit="replace" novalidate>
+      <div><h1 class="text-h1 sm:text-display">Ganti dongle</h1><p class="mt-2 text-reading text-ink2">Tancapkan flashdisk baru, lalu buktikan identitas Anda. Dongle lama langsung tidak berlaku.</p></div>
+      <div class="grid gap-6 md:grid-cols-[1fr_300px]">
+        <div class="space-y-4">
+          ${field({ id: "replace-user", label: "NIP atau username", value: r.username, bind: "replace.username", help: "Gunakan akun yang terdaftar pada komputer ini.", error: r.errors.username })}
+          ${field({ id: "replace-pin", label: "PIN", value: r.pin, bind: "replace.pin", secret: true, placeholder: "Masukkan PIN", error: r.errors.pin })}
+        </div>
+        <div class="space-y-3">${camera}${photoErr}</div>
+      </div>
+      ${r.formError ? `<p class="field-error" role="alert">${esc(r.formError)}</p>` : ""}
+      <div class="flex flex-col-reverse justify-between gap-3 sm:flex-row">${button("ghost", "Batal", { action: "replace-cancel" })}${button("primary", "Ganti dongle", { submit: true, icon: "usb", loading: r.busy })}</div>
+    </form>`, { wide: true });
+}
+
+function viewDbFail() {
+  const db = (S.status && S.status.db) || {};
+  const rows = db.expected && db.actual ? `<dl class="space-y-1 rounded-2xl bg-muted p-4"><div class="flex gap-3"><dt class="w-24 flex-none text-caption text-ink2">Tersimpan</dt><dd class="mono">${esc(short(db.expected))}</dd></div><div class="flex gap-3"><dt class="w-24 flex-none text-caption text-ink2">Saat ini</dt><dd class="mono">${esc(short(db.actual))}</dd></div></dl>` : "";
+  return authShell(["done", "wait", "wait"], `<div class="space-y-6">${iconTile("peringatan", "bg-bad-bg text-bad-text")}<div><h1 class="text-display">Database berubah</h1><p class="mt-2 text-reading text-ink2">File database berubah dari luar aplikasi, jadi login ditahan. Pulihkan salinan terakhir yang terbukti utuh. Perubahan sesudah salinan itu tidak ikut kembali.</p></div>${rows}<div>${button("primary", "Pulihkan salinan terakhir", { action: "restore", loading: S.restore.busy, cls: "w-full" })}${S.restore.error ? `<p class="field-error" role="alert">${esc(S.restore.error)}</p>` : ""}</div></div>`);
 }
 
 function viewLogin() {
@@ -242,7 +278,7 @@ function viewLogin() {
       <div><h1 class="text-display">Masuk sebagai staf</h1><p class="mt-2 text-reading text-ink2">Masukkan username dan PIN. Setelah itu, aplikasi memindai wajah Anda.</p></div>
       ${field({ id: "login-user", label: "NIP atau username", value: l.username, bind: "login.username", help: "Gunakan akun yang terdaftar pada instansi.", error: l.usernameError, autocomplete: "username" })}
       ${field({ id: "login-pin", label: "PIN", value: l.pin, bind: "login.pin", secret: true, placeholder: "Masukkan PIN", help: "Gunakan PIN yang Anda buat saat mendaftar.", error: l.error, autocomplete: "current-password" })}
-      <div class="space-y-2">${button("primary", l.rejected ? "Coba lagi" : "Lanjut ke verifikasi wajah", { submit: true, icon: l.rejected ? null : "wajah", cls: "w-full" })}${button("ghost", "Daftar sebagai staf baru", { action: "go-register", cls: "w-full" })}</div>
+      <div class="space-y-2">${button("primary", l.rejected ? "Coba lagi" : "Lanjut ke verifikasi wajah", { submit: true, icon: l.rejected ? null : "wajah", cls: "w-full", loading: l.busy })}${button("ghost", "Daftar sebagai staf baru", { action: "go-register", cls: "w-full" })}</div>
     </form>`);
 }
 
@@ -386,11 +422,10 @@ function memoSheet() {
 
 function memoForm() {
   const m = S.memo;
-  const cats = ["Biasa", "Rahasia", "Sangat rahasia"];
   return `<form class="flex flex-1 flex-col gap-5" data-submit="memo-save" novalidate>
     <h2 class="text-display">Tulis memo</h2>
     ${field({ id: "memo-title", label: "Judul memo", value: m.form.title, bind: "memo.form.title", placeholder: "Contoh: Memo Anggaran Kuartal IV", help: "AegisVault mengenkripsi judul sebelum menyimpannya ke database.", error: m.errors.title })}
-    <fieldset><legend class="field-label">Klasifikasi</legend><div class="flex flex-wrap gap-2">${cats.map((c) => `<label class="relative inline-flex min-h-[44px] cursor-pointer items-center rounded-xl px-4 text-body transition-colors duration-150 has-[:checked]:bg-amber-100 has-[:checked]:font-semibold has-[:checked]:text-amber-800 has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-amber-700 bg-muted text-ink2"><input class="sr-only" type="radio" name="category" value="${c}" data-bind="memo.form.category" ${m.form.category === c ? "checked" : ""}>${c}</label>`).join("")}</div></fieldset>
+    ${field({ id: "memo-category", label: "Kategori klasifikasi", value: m.form.category, bind: "memo.form.category", placeholder: "Tulis kategori sesuai aturan instansi", help: "Aplikasi mengenkripsi kategori bersama judul.", error: m.errors.category })}
     <div class="flex min-h-[180px] flex-1 flex-col"><label class="field-label" for="memo-content">Isi memo</label><textarea id="memo-content" class="field-input min-h-[140px] flex-1 ${m.errors.content ? "is-error" : ""}" data-bind="memo.form.content" ${m.errors.content ? 'aria-invalid="true" aria-describedby="memo-content-note"' : 'aria-describedby="memo-content-note"'}>${esc(m.form.content)}</textarea><p id="memo-content-note" class="${m.errors.content ? "field-error" : "field-help"}" ${m.errors.content ? 'role="alert"' : ""}>${esc(m.errors.content || "Isi memo dienkripsi dua lapis: Extended Vigenere, lalu AES-128.")}</p></div>
     ${m.errors.form ? `<p class="field-error" role="alert">${esc(m.errors.form)}</p>` : ""}
     <div class="flex justify-end gap-3">${button("secondary", "Batal", { action: "memo-cancel" })}${button("primary", "Simpan dan segel", { icon: "segel", submit: true })}</div>
@@ -454,6 +489,7 @@ function resultCard(res) {
   const map = {
     VALID: ["ok", "centang", "Sertifikat blockchain valid", "Dokumen asli dan belum dimodifikasi sejak disegel.", "Cocok: hash isi paket sama dengan sertifikat."],
     TAMPERED_CONTENT: ["bad", "peringatan", "Integritas dokumen rusak", "Isi paket berubah setelah disegel. Jangan pakai dokumen ini, lalu minta pengirim mengekspor ulang.", "Tidak cocok: hash isi paket berbeda dari sertifikat."],
+    TAMPERED_PACKAGE: ["bad", "peringatan", "Isi paket berubah setelah diekspor", "Judul, kategori, pengirim, atau sertifikat paket ini sudah diubah. Jangan pakai dokumen ini, lalu minta pengirim mengekspor ulang.", "Tidak cocok: kode integritas paket berbeda dari hasil hitung ulang."],
     TAMPERED_CERTIFICATE: ["bad", "peringatan", "Sertifikat blockchain tidak valid", "Data sertifikat berubah atau tidak memenuhi bukti kerja. Jangan pakai dokumen ini, lalu minta pengirim mengekspor ulang.", "Tidak cocok: hash blok berbeda dari hasil hitung ulang."],
     TAMPERED_CHAIN: ["bad", "peringatan", "Sertifikat bertentangan dengan rantai lokal", "Komputer ini mencatat hash blok berbeda untuk dokumen yang sama. Jangan pakai dokumen ini, lalu laporkan ke pengirim.", "Tidak cocok: hash blok berbeda dari catatan rantai lokal."],
   }[res.status];
@@ -574,7 +610,8 @@ function tabAudit() {
   const db = d.db || {};
   const dbMap = { OK: ["ok", "Checksum cocok", "Hash SHA-256 file aegis_vault.db sama dengan nilai yang tersimpan terakhir kali."], TAMPERED: ["bad", "Checksum tidak cocok", "File aegis_vault.db berubah dari luar aplikasi."], MISSING_CHECKSUM: ["warn", "Checksum belum ada", "Aplikasi belum menyimpan checksum untuk database ini."], NO_DATABASE: ["warn", "Database belum ada", "Database dibuat saat data pertama disimpan."] }[db.status] || ["neutral", "Status tidak diketahui", db.message || ""];
   return `${header(a.checking)}<div class="space-y-4">
-    <div class="flex items-center gap-3 rounded-2xl px-5 py-4 ${banner[0]}" role="status">${icon(banner[1], `h-6 w-6 flex-none ${banner[3]}`)}<p class="text-body font-semibold">${esc(banner[2])}</p></div>
+    <div class="flex flex-wrap items-center gap-3 rounded-2xl px-5 py-4 ${banner[0]}" role="status">${icon(banner[1], `h-6 w-6 flex-none ${banner[3]}`)}<p class="min-w-0 flex-1 text-body font-semibold">${esc(banner[2])}</p>${!a.checking && (!d.chain_valid || d.db.status !== "OK") ? button("secondary", "Pulihkan salinan terakhir", { action: "restore", loading: S.restore.busy }) : ""}</div>
+    ${S.restore.error ? `<p class="field-error" role="alert">${esc(S.restore.error)}</p>` : ""}
     <section class="card p-6"><h2 class="mb-4 text-h2">Rantai blok lokal</h2>${chain.length ? `<ol class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">${blocks}</ol>` : statePanel({ ic: "rantai", title: "Rantai masih kosong", body: "Blok pertama muncul setelah memo atau berkas disegel." })}</section>
     <section class="card p-6"><div class="flex flex-wrap items-center justify-between gap-3"><h2 class="text-h2">Checksum database</h2>${badge(dbMap[0], dbMap[1], dbMap[0] === "warn" ? "peringatan" : undefined)}</div><p class="mt-2 text-body text-ink2">${esc(dbMap[2])}</p>${db.status === "TAMPERED" ? `<dl class="mt-3 space-y-1"><div class="flex gap-3"><dt class="w-24 text-caption text-ink2">Tersimpan</dt><dd class="mono">${esc(short(db.expected))}</dd></div><div class="flex gap-3"><dt class="w-24 text-caption text-ink2">Saat ini</dt><dd class="mono">${esc(short(db.actual))}</dd></div></dl>` : ""}</section>
   </div>`;
@@ -586,7 +623,7 @@ function render({ focusMain = false } = {}) {
   const active = document.activeElement;
   const activeId = active && active.id;
   const selStart = active && "selectionStart" in active ? active.selectionStart : null;
-  const views = { boot: viewBoot, offline: viewOffline, dongle: viewDongle, login: viewLogin, face: viewFace, register: viewRegister, app: viewApp };
+  const views = { boot: viewBoot, offline: viewOffline, dongle: viewDongle, replace: viewReplace, dbfail: viewDbFail, login: viewLogin, face: viewFace, register: viewRegister, app: viewApp };
   S.animate = S.view !== S.lastView;
   S.lastView = S.view;
   root().innerHTML = views[S.view]();
@@ -621,7 +658,7 @@ function focusFirstError() {
 }
 
 function go(view, opts) {
-  if (view !== "face" && view !== "register") stopCamera();
+  if (view !== "face" && view !== "register" && view !== "replace") stopCamera();
   S.view = view;
   render({ focusMain: true, ...opts });
 }
@@ -671,6 +708,24 @@ async function openFace() {
   render({ focusMain: true });
 }
 
+function applyLoginError(err) {
+  const l = S.login;
+  l.usernameError = "";
+  l.error = "";
+  l.rejected = false;
+  if (err.code === "USER_NOT_FOUND") {
+    l.usernameError = "Akun belum terdaftar. Periksa username, atau daftar sebagai staf baru.";
+  } else if (err.code === "PIN_INVALID") {
+    l.error = "PIN salah. Periksa Caps Lock, lalu coba lagi.";
+    l.rejected = true;
+    l.pin = "";
+  } else {
+    l.error = err.message;
+    l.rejected = true;
+    l.pin = "";
+  }
+}
+
 async function submitLogin(photo) {
   S.face.state = "scanning";
   S.face.photo = photo;
@@ -683,13 +738,10 @@ async function submitLogin(photo) {
     S.face = { state: "pass", error: "", photo };
     render({ focusMain: true });
   } catch (err) {
-    if (err.code === "CREDENTIALS_INVALID") {
-      S.login.error = "Username atau PIN salah. Periksa Caps Lock, lalu coba lagi.";
-      S.login.rejected = true;
-      S.login.pin = "";
+    if (err.code === "PIN_INVALID" || err.code === "USER_NOT_FOUND" || err.code === "TOO_MANY_ATTEMPTS") {
+      applyLoginError(err);
       go("login");
-      const pin = document.getElementById("login-pin");
-      if (pin) pin.focus();
+      focusFirstError();
       return;
     }
     const msg = { NO_FACE: "Aplikasi tidak menemukan wajah pada gambar. Hadapkan wajah ke kamera, lalu coba lagi." }[err.code] || err.message;
@@ -713,15 +765,30 @@ async function pollStatus() {
   const prevDb = S.status && S.status.db && S.status.db.status;
   S.status = st;
   const valid = !!(st.dongle && st.dongle.valid);
+  const dbBad = !!(st.db && !st.db.ok);
 
   if (S.view === "boot" || S.view === "offline") {
     if (st.session) S.session = st.session;
     if (!valid) { S.view = "dongle"; render({ focusMain: true }); return; }
+    if (dbBad && !S.session) { S.view = "dbfail"; render({ focusMain: true }); return; }
     if (S.session) { enterApp(); return; }
     S.view = "login";
     render({ focusMain: true });
     return;
   }
+
+  if (S.view === "replace") {
+    if (valid) { S.replace = blankReplace(); go("login"); }
+    return;
+  }
+
+  if (S.view === "dbfail") {
+    if (!valid) { S.view = "dongle"; render({ focusMain: true }); return; }
+    if (!dbBad) { S.restore = { busy: false, error: "" }; go("login"); }
+    return;
+  }
+
+  if (dbBad && valid && S.view !== "app") { stopCamera(); S.view = "dbfail"; render({ focusMain: true }); return; }
 
   if (S.view === "app") {
     if (!st.session) {
@@ -740,7 +807,7 @@ async function pollStatus() {
   }
 
   if (!valid && S.view !== "dongle") { stopCamera(); S.view = "dongle"; render({ focusMain: true }); return; }
-  if (valid && S.view === "dongle") { S.enroll = { busy: false, error: "" }; S.view = "login"; render({ focusMain: true }); return; }
+  if (valid && S.view === "dongle") { S.enroll = { busy: false, error: "" }; S.view = dbBad ? "dbfail" : "login"; render({ focusMain: true }); return; }
   if (S.view === "dongle") {
     const key = JSON.stringify(st.dongle);
     if (key !== S._dongleKey) { S._dongleKey = key; render(); }
@@ -928,7 +995,33 @@ const actions = {
       render();
     }
   },
-  "go-register": () => { S.reg = blankReg(); S.login.error = ""; openRegister(); },
+  "go-replace": () => { S.replace = blankReplace(); openReplace(); },
+  "replace-cancel": () => { S.replace = blankReplace(); go("dongle"); },
+  "replace-camera": () => openReplace(),
+  "replace-retake": () => { S.replace.photo = null; openReplace(); },
+  "replace-capture": () => {
+    const photo = captureFrame();
+    if (!photo) { S.replace.errors.photo = "Kamera belum mengirim gambar. Coba lagi sebentar."; render(); return; }
+    S.replace.photo = photo;
+    S.replace.errors.photo = "";
+    stopCamera();
+    render();
+  },
+  restore: async () => {
+    S.restore = { busy: true, error: "" };
+    render();
+    try {
+      const res = await postJson("/api/system/restore", {});
+      S.restore = { busy: false, error: "" };
+      toast(res.restored.length ? `Salinan ${res.restored.join(" dan ")} sudah dipulihkan.` : "Tidak ada yang perlu dipulihkan.");
+      if (S.view === "app") { S.memo = blankMemo(); S.vault = blankVault(); await loadAudit(); }
+      await pollStatus();
+    } catch (err) {
+      S.restore = { busy: false, error: err.message };
+      render();
+    }
+  },
+  "go-register": () => { S.reg = blankReg(); S.login.error = ""; S.login.usernameError = ""; openRegister(); },
   "go-login": () => { S.login.error = ""; go("login"); },
   "back-pin": () => go("login"),
   "camera-retry": () => openFace(),
@@ -967,7 +1060,7 @@ const actions = {
     go("login");
   },
   "memo-reload": () => loadMemos(),
-  "memo-new": () => { const m = S.memo; m.compose = true; m.errors = {}; m.form = { title: "", category: "Rahasia", content: "" }; render(); const t = document.getElementById("memo-title"); if (t) t.focus(); },
+  "memo-new": () => { const m = S.memo; m.compose = true; m.errors = {}; m.form = { title: "", category: "", content: "" }; render(); const t = document.getElementById("memo-title"); if (t) t.focus(); },
   "memo-cancel": () => { S.memo.compose = false; render(); },
   "memo-select": (el) => loadDetail(isNaN(el.dataset.id) ? el.dataset.id : Number(el.dataset.id)),
   "memo-export": () => { S.dialog = { type: "export", pass: "", error: "", busy: false }; render(); },
@@ -1027,6 +1120,14 @@ function closeDialog() {
   render();
 }
 
+async function openReplace() {
+  S.view = "replace";
+  S.replace.cam = "idle";
+  const ok = S.replace.photo ? true : await startCamera();
+  if (!ok) S.replace.cam = "nocam";
+  render({ focusMain: true });
+}
+
 async function openRegister() {
   S.view = "register";
   S.reg.cam = "idle";
@@ -1036,13 +1137,54 @@ async function openRegister() {
 }
 
 const submits = {
-  login: () => {
+  login: async () => {
     const l = S.login;
     l.usernameError = l.username.trim() ? "" : "Isi NIP atau username.";
     l.error = l.pin ? "" : "Isi PIN.";
     if (l.usernameError || l.error) { render(); focusFirstError(); return; }
-    l.rejected = false;
-    openFace();
+    l.busy = true;
+    render();
+    try {
+      await postJson("/api/auth/check", { username: l.username.trim(), password: l.pin });
+      l.busy = false;
+      l.rejected = false;
+      openFace();
+    } catch (err) {
+      l.busy = false;
+      if (err.code === "DB_TAMPERED") { await pollStatus(); return; }
+      applyLoginError(err);
+      render();
+      focusFirstError();
+    }
+  },
+  replace: async () => {
+    const r = S.replace;
+    const e = {};
+    if (!r.username.trim()) e.username = "Isi NIP atau username.";
+    if (!r.pin) e.pin = "Isi PIN.";
+    if (!r.photo) e.photo = "Ambil foto wajah dulu.";
+    r.errors = e;
+    r.formError = "";
+    if (Object.keys(e).length) { render(); focusFirstError(); return; }
+    r.busy = true;
+    render();
+    try {
+      await postJson("/api/dongle/replace", { username: r.username.trim(), password: r.pin, face_image: r.photo });
+      S.replace = blankReplace();
+      S.session = null;
+      toast("Dongle baru terdaftar. Dongle lama tidak berlaku lagi.");
+      await pollStatus();
+    } catch (err) {
+      r.busy = false;
+      r.pin = "";
+      if (err.code === "USER_NOT_FOUND") r.errors.username = "Akun belum terdaftar. Periksa username.";
+      else if (err.code === "PIN_INVALID") r.errors.pin = "PIN salah. Periksa Caps Lock, lalu coba lagi.";
+      else if (err.code === "FACE_MISMATCH") { r.photo = null; r.errors.photo = "Wajah tidak cocok. Ambil ulang foto."; openReplace(); return; }
+      else if (err.code === "NO_FACE") { r.photo = null; r.errors.photo = "Aplikasi tidak menemukan wajah. Ambil ulang foto."; openReplace(); return; }
+      else r.formError = err.message;
+      render();
+      focusFirstError();
+    }
   },
   register: async () => {
     const r = S.reg;
@@ -1074,6 +1216,7 @@ const submits = {
     const m = S.memo;
     const e = {};
     if (!m.form.title.trim()) e.title = "Isi judul memo.";
+    if (!m.form.category.trim()) e.category = "Isi kategori klasifikasi.";
     if (!m.form.content.trim()) e.content = "Isi memo masih kosong.";
     m.errors = e;
     if (Object.keys(e).length) { render(); focusFirstError(); return; }
@@ -1180,6 +1323,7 @@ const fileHandlers = {
   "cover-file": setCover,
   "stego-file": setStegoFile,
   "face-upload": async (file) => { const photo = await fileToDataUrl(file); S.face.state = "ready"; submitLogin(photo); },
+  "replace-upload": async (file) => { S.replace.photo = await fileToDataUrl(file); S.replace.cam = "idle"; render(); },
   "reg-upload": async (file) => { S.reg.photo = await fileToDataUrl(file); S.reg.cam = "idle"; render(); },
 };
 const dropMap = {

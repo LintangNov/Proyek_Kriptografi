@@ -52,6 +52,10 @@ Untuk mencegah kelemahan penggunaan kunci yang sama secara berulang, sistem meng
    }
    ```
 4. **Validasi:** Dongle dinyatakan valid jika file `dongle.key` ditemukan pada drive yang terpasang DAN perhitungan ulang `signature` cocok dengan *Volume Serial Number* perangkat keras fisik tempat file itu berada (sehingga file `dongle.key` tidak akan berfungsi jika sekadar di-*copy-paste* ke folder harddisk lokal atau flashdisk lain yang berbeda nomor serinya).
+5. **Dongle Terdaftar per Komputer:** `dongle_id` yang diterima dicatat di `storage/dongle_registry.json` beserta HMAC berkunci. USB dengan tanda tangan sah tetap ditolak jika `dongle_id`-nya berbeda dari catatan.
+   * Pendaftaran tanpa login hanya boleh saat komputer belum punya dongle dan belum punya staf.
+   * Setelah itu, dongle hanya bisa diganti lewat `POST /api/dongle/replace` dengan username, PIN, dan wajah. Dongle lama langsung tidak berlaku.
+   * Komputer baru tanpa data menerima dongle sah pertama sebagai dongle terdaftarnya.
 
 ### 3.2 Modul 2: Biometrik Adaptif & Hashing Kredensial (`backend/biometric_auth.py` & `crypto_engine.py`)
 
@@ -155,6 +159,7 @@ CREATE TABLE IF NOT EXISTS attachments (
 #### Mekanisme Proteksi Basis Data:
 1. **Field-Level Encryption:** Seluruh kolom berakhiran `_enc` (`full_name_enc`, `title_enc`, `category_enc`, `original_filename_enc`) dienkripsi menggunakan kunci sistem aplikasi sebelum disimpan ke SQLite.
 2. **Database File Integrity Checksum:** Setiap kali aplikasi selesai melakukan transaksi tulis (`INSERT`/`DELETE`), aplikasi menghitung hash SHA-256 dari keseluruhan file biner `storage/aegis_vault.db` dan menyimpannya ke `storage/db_checksum.sha256`. Saat aplikasi membaca data, nilai checksum diperiksa untuk mendeteksi apakah file `.db` telah dimodifikasi dari luar aplikasi.
+3. **HMAC dan Salinan Terakhir:** SHA-256 saja bisa dihitung ulang oleh pengubah file, jadi aplikasi juga menyimpan HMAC-SHA256 berkunci di `aegis_vault.db.hmac` dan salinan utuh di `aegis_vault.db.bak`. `POST /api/system/restore` hanya memulihkan salinan yang HMAC-nya cocok. Buku besar memakai cara yang sama lewat `blockchain.json.sig` dan `blockchain.json.bak`.
 
 ### 3.6 Modul 6: Steganografi Citra Digital LSB (`backend/stego_engine.py`)
 Menggunakan metode **Least Significant Bit (LSB)** pada citra RGB 24-bit (3 byte per piksel: $R, G, B$) dengan protokol *Header* eksplisit agar proses ekstraksi presisi.
@@ -200,7 +205,8 @@ Menggunakan metode **Least Significant Bit (LSB)** pada citra RGB 24-bit (3 byte
 Saat staf mengekspor memo untuk dikirim ke staf lain, aplikasi menghasilkan file JSON berekstensi `.vault`:
 ```json
 {
-  "vault_version": "1.0",
+  "vault_version": "1.1",
+  "integrity_mac": "<HMAC-SHA256 seluruh field paket, kunci = SHA256('AegisVault-Vault-MAC-v1' || K1 || K2)>",
   "export_salt": "<16-byte-hex-salt>",
   "metadata": {
     "doc_uuid": "DOC-9012-AB",
@@ -230,6 +236,7 @@ Saat staf mengekspor memo untuk dikirim ke staf lain, aplikasi menghasilkan file
      * $H_{\text{hitung}} == \text{blockchain\_certificate.payload\_sha256}$ (Isi pesan tidak pernah diubah).
      * Hash ulang blok cocok dengan `block_hash` dan diawali `"000"` (Sertifikat blok valid).
      * Jika blok dengan `doc_uuid` tersebut ada di rantai blok lokal instansi, pastikan `block_hash`-nya identik dengan catatan di `blockchain.json`.
+  5. Hitung ulang `integrity_mac`. Tanpa passphrase, judul, kategori, pengirim, dan sertifikat tidak bisa diubah tanpa terdeteksi (status `TAMPERED_PACKAGE`). Pemegang passphrase tetap bisa membuat paket baru, karena kunci ini dibagi bersama dan bukan tanda tangan digital.
 
 ---
 
@@ -240,7 +247,10 @@ Saat staf mengekspor memo untuk dikirim ke staf lain, aplikasi menghasilkan file
 | `GET` | `/api/system/status` | Mengecek status USB Dongle, kapabilitas sensor Fingerprint/Webcam, status integritas Checksum DB, dan sesi user aktif. |
 | `POST` | `/api/dongle/enroll` | Mendaftarkan USB Flashdisk yang sedang tertancap dan membuat file `dongle.key` di dalamnya. |
 | `POST` | `/api/auth/register` | Mendaftarkan akun staf baru (simpan hash PIN SHA-256 + matriks wajah dari base64 webcam). |
+| `POST` | `/api/auth/check` | Memeriksa akun dan PIN sebelum kamera dinyalakan. Setelah 5 kali gagal, percobaan ditahan mulai 30 detik. |
 | `POST` | `/api/auth/login` | Memverifikasi PIN SHA-256 dan kecocokan biometrik wajah staf. |
+| `POST` | `/api/dongle/replace` | Mengganti dongle hilang dengan username, PIN, dan wajah. |
+| `POST` | `/api/system/restore` | Memulihkan salinan terakhir database atau rantai blok yang terbukti utuh. |
 | `POST` | `/api/auth/logout` | Mengakhiri sesi staf yang sedang login. |
 | `GET` | `/api/documents` | Mengambil daftar memo internal milik instansi/staf dan mendekripsi *field* judulnya. |
 | `POST` | `/api/documents` | Menyimpan memo baru dengan Super Enkripsi (Extended Vigenère + AES-128-CBC) & mencetak blok sertifikat di Blockchain. |

@@ -25,6 +25,7 @@ import functools
 import hashlib
 import hmac
 import os
+import shutil
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -151,6 +152,10 @@ class Database:
     def __init__(self, storage_dir: Optional[str] = None, pepper: Optional[str] = None):
         self.paths = config.ensure_storage_dirs(storage_dir)
         self._field_key = _system_field_key(pepper or config.SYSTEM_SECRET_PEPPER)
+        # Kunci HMAC: tanpa ini, siapa pun yang mengubah file bisa menghitung ulang SHA-256-nya.
+        self.integrity_key = hashlib.sha256(b"AegisVault-Integrity-v1" + (pepper or config.SYSTEM_SECRET_PEPPER).encode("utf-8")).digest()
+        self.hmac_path = self.paths.db + ".hmac"
+        self.backup_path = self.paths.db + ".bak"
         self._lock = threading.RLock()
         self._initialize()
 
@@ -188,15 +193,60 @@ class Database:
                 digest.update(chunk)
         return digest.hexdigest()
 
+    def _file_hmac(self, path: str) -> str:
+        """HMAC-SHA256 berkunci atas seluruh isi file."""
+        digest = hmac.new(self.integrity_key, digestmod=hashlib.sha256)
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _write_atomic(path: str, text: str) -> None:
+        temp_path = path + ".tmp"
+        with open(temp_path, "w", encoding="ascii") as f:
+            f.write(text)
+        os.replace(temp_path, path)
+
     def update_checksum(self) -> str:
-        """Menghitung ulang checksum dan menyimpannya ke db_checksum.sha256 secara atomik."""
+        """Menyimpan checksum, HMAC berkunci, dan salinan database terakhir yang utuh."""
         with self._lock:
             checksum = self.compute_db_checksum()
-            temp_path = self.paths.db_checksum + ".tmp"
-            with open(temp_path, "w", encoding="ascii") as f:
-                f.write(checksum)
-            os.replace(temp_path, self.paths.db_checksum)
+            self._write_atomic(self.paths.db_checksum, checksum)
+            self._write_atomic(self.hmac_path, self._file_hmac(self.paths.db))
+            temp_backup = self.backup_path + ".tmp"
+            shutil.copyfile(self.paths.db, temp_backup)
+            os.replace(temp_backup, self.backup_path)
             return checksum
+
+    def adopt_legacy_checksum(self) -> bool:
+        """Database dari versi lama belum punya HMAC. Hanya diterima jika SHA-256-nya masih cocok."""
+        with self._lock:
+            if os.path.exists(self.hmac_path) or not self.check_sha256_only():
+                return False
+            self.update_checksum()
+            return True
+
+    def check_sha256_only(self) -> bool:
+        if not (os.path.exists(self.paths.db) and os.path.exists(self.paths.db_checksum)):
+            return False
+        with open(self.paths.db_checksum, "r", encoding="ascii", errors="replace") as f:
+            return hmac.compare_digest(f.read().strip().lower(), self.compute_db_checksum())
+
+    def restore_backup(self) -> bool:
+        """Memulihkan salinan terakhir, hanya jika HMAC-nya membuktikan salinan itu asli."""
+        with self._lock:
+            if not (os.path.exists(self.backup_path) and os.path.exists(self.hmac_path)):
+                return False
+            with open(self.hmac_path, "r", encoding="ascii", errors="replace") as f:
+                expected = f.read().strip().lower()
+            if not hmac.compare_digest(expected, self._file_hmac(self.backup_path)):
+                return False
+            temp_path = self.paths.db + ".restore"
+            shutil.copyfile(self.backup_path, temp_path)
+            os.replace(temp_path, self.paths.db)
+            self.update_checksum()
+            return True
 
     def check_integrity(self) -> Dict[str, Any]:
         """
@@ -213,11 +263,19 @@ class Database:
                                     "File checksum database hilang.")
             with open(self.paths.db_checksum, "r", encoding="ascii", errors="replace") as f:
                 expected = f.read().strip().lower()
-            if hmac.compare_digest(expected, actual):
-                return self._report(STATUS_OK, expected, actual,
-                                    "Checksum database cocok. File tidak berubah.")
-            return self._report(STATUS_TAMPERED, expected, actual,
-                                "Checksum tidak cocok. File database diubah dari luar aplikasi.")
+            if not hmac.compare_digest(expected, actual):
+                return self._report(STATUS_TAMPERED, expected, actual,
+                                    "Checksum tidak cocok. File database diubah dari luar aplikasi.")
+            if not os.path.exists(self.hmac_path):
+                return self._report(STATUS_MISSING_CHECKSUM, expected, actual,
+                                    "File HMAC database hilang.")
+            with open(self.hmac_path, "r", encoding="ascii", errors="replace") as f:
+                stored_hmac = f.read().strip().lower()
+            if not hmac.compare_digest(stored_hmac, self._file_hmac(self.paths.db)):
+                return self._report(STATUS_TAMPERED, expected, actual,
+                                    "HMAC tidak cocok. File database dan checksumnya diubah dari luar aplikasi.")
+            return self._report(STATUS_OK, expected, actual,
+                                "Checksum database cocok. File tidak berubah.")
 
     @staticmethod
     def _report(status: str, expected: Optional[str], actual: Optional[str], message: str) -> Dict[str, Any]:

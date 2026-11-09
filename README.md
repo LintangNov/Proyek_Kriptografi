@@ -110,6 +110,7 @@ $env:AEGIS_PORT="8080"; python main.py --no-window
 1. **Inisialisasi USB Dongle:**
    * Tancapkan USB Flashdisk ke komputer.
    * Jalankan aplikasi. Pada layar awal *Hardware Security Dongle Required*, pilih menu inisialisasi flashdisk untuk membuat berkas `dongle.key`.
+   * Pendaftaran tanpa login hanya tersedia saat komputer belum punya dongle dan belum punya staf. Setelah itu, komputer hanya menerima dongle tersebut. Kalau dongle hilang, gunakan menu **Ganti dongle** dengan username, PIN, dan wajah.
 2. **Pendaftaran Akun Staf Pertama:**
    * Masukkan NIP/Username dan PIN/Kata Sandi.
    * Lakukan pengambilan sampel wajah via webcam (atau unggah foto jika `AEGIS_TEST_MODE=1`).

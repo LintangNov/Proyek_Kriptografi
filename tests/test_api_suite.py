@@ -4,6 +4,7 @@ Hanya pencocokan wajah yang diganti, karena Slice 3 sudah mengujinya di test_sys
 dan tes ini tidak punya foto wajah sungguhan.
 """
 import base64
+import hashlib
 import io
 import json
 import os
@@ -16,6 +17,7 @@ from PIL import Image
 
 import main
 from backend import biometric_auth as biometric
+from backend.blockchain_ledger import Blockchain, import_and_verify_vault, mine_pow
 
 GOOD_FACE = "data:image/jpeg;base64,V0FKQUg="
 OTHER_FACE = "data:image/jpeg;base64,TEFJTg=="
@@ -127,8 +129,8 @@ def test_login_outcomes(env):
     client, core, _ = env
     enroll(client, core)
     signup(client)
-    assert code(login(client, pin="salah99")) == "CREDENTIALS_INVALID"
-    assert code(login(client, username="tidak_ada")) == "CREDENTIALS_INVALID"
+    assert code(login(client, pin="salah99")) == "PIN_INVALID"
+    assert code(login(client, username="tidak_ada")) == "USER_NOT_FOUND"
     assert code(login(client, face=OTHER_FACE)) == "FACE_MISMATCH"
     assert code(login(client, face=NO_FACE)) == "NO_FACE"
     assert client.get("/api/system/status").json()["session"] is None
@@ -151,12 +153,131 @@ def test_routes_need_session(env):
 
 def test_removing_dongle_locks_api(staff):
     client, core, usb = staff
-    (usb / "dongle.key").unlink()
+    key = usb / "dongle.key"
+    saved = key.read_bytes()
+    key.unlink()
     core.monitor.refresh()
     assert code(client.get("/api/documents")) == "DONGLE_REQUIRED"
-    client.post("/api/dongle/enroll", json={})
+    key.write_bytes(saved)
     core.monitor.refresh()
     assert client.get("/api/documents").status_code == 200
+
+
+def use_usb(monkeypatch, core, path):
+    path.mkdir(exist_ok=True)
+    monkeypatch.setenv("AEGIS_DONGLE_SIMULATION", str(path))
+    core.monitor.refresh()
+
+
+def test_other_usb_cannot_be_enrolled_after_setup(staff, tmp_path, monkeypatch):
+    client, core, _ = staff
+    use_usb(monkeypatch, core, tmp_path / "usb_lain")
+    st = client.get("/api/system/status").json()["dongle"]
+    assert st["valid"] is False and st["can_enroll"] is False
+    r = client.post("/api/dongle/enroll", json={})
+    assert r.status_code == 403 and code(r) == "DONGLE_LOCKED"
+    assert not (tmp_path / "usb_lain" / "dongle.key").exists()
+    assert code(client.get("/api/documents")) == "DONGLE_REQUIRED"
+
+
+def test_signed_usb_from_other_install_is_rejected(staff, tmp_path, monkeypatch):
+    client, core, _ = staff
+    other = tmp_path / "usb_kantor_lain"
+    other.mkdir()
+    monkeypatch.setenv("AEGIS_DONGLE_SIMULATION", str(other))
+    assert core.guard.enroll_dongle()["valid"] is True
+    core.monitor.refresh()
+    st = client.get("/api/system/status").json()["dongle"]
+    assert st["valid"] is False and "bukan dongle" in st["reason"]
+    assert code(client.get("/api/documents")) == "DONGLE_REQUIRED"
+
+
+def test_replace_dongle_needs_pin_and_face(staff, tmp_path, monkeypatch):
+    client, core, usb = staff
+    use_usb(monkeypatch, core, tmp_path / "usb_baru")
+    body = {"username": "staf_budi", "password": "123456", "face_image": GOOD_FACE}
+    assert code(client.post("/api/dongle/replace", json={**body, "password": "keliru1"})) == "PIN_INVALID"
+    assert code(client.post("/api/dongle/replace", json={**body, "face_image": OTHER_FACE})) == "FACE_MISMATCH"
+    assert code(client.post("/api/dongle/replace", json={**body, "username": "tidak_ada"})) == "USER_NOT_FOUND"
+    assert client.post("/api/dongle/replace", json=body).status_code == 200
+    assert (tmp_path / "usb_baru" / "dongle.key").exists()
+    assert client.get("/api/system/status").json()["dongle"]["valid"] is True
+    assert client.get("/api/system/status").json()["session"] is None
+    monkeypatch.setenv("AEGIS_DONGLE_SIMULATION", str(usb))
+    core.monitor.refresh()
+    assert client.get("/api/system/status").json()["dongle"]["valid"] is False
+
+
+def test_edited_registry_is_rejected(staff):
+    client, core, _ = staff
+    data = json.load(open(core.registry_path, encoding="utf-8"))
+    data["dongle_id"] = "AEGIS-DONGLE-PALSU"
+    json.dump(data, open(core.registry_path, "w", encoding="utf-8"))
+    st = client.get("/api/system/status").json()["dongle"]
+    assert st["valid"] is False and st["can_enroll"] is False
+
+
+def test_deleted_registry_does_not_reopen_enroll(staff):
+    client, core, _ = staff
+    os.remove(core.registry_path)
+    st = client.get("/api/system/status").json()["dongle"]
+    assert st["valid"] is False and st["can_enroll"] is False
+    assert client.post("/api/dongle/enroll", json={}).status_code == 403
+
+
+def test_new_computer_accepts_existing_dongle(tmp_path, monkeypatch):
+    usb = tmp_path / "usb"
+    usb.mkdir()
+    monkeypatch.setenv("AEGIS_DONGLE_SIMULATION", str(usb))
+    first = main.create_app(str(tmp_path / "laptop_a"), test_mode=False).state.core
+    first.guard.enroll_dongle()
+    app = main.create_app(str(tmp_path / "laptop_b"), test_mode=False)
+    with TestClient(app, base_url="http://127.0.0.1") as c:
+        app.state.core.monitor.refresh()
+        assert c.get("/api/system/status").json()["dongle"]["valid"] is True
+        assert app.state.core.registered_dongle()
+
+
+# ---------- Cek akun dan batas percobaan ----------
+
+def test_check_reports_unregistered_before_camera(env):
+    client, core, _ = env
+    enroll(client, core)
+    signup(client)
+    assert code(client.post("/api/auth/check", json={"username": "belum_ada", "password": "123456"})) == "USER_NOT_FOUND"
+    assert code(client.post("/api/auth/check", json={"username": "staf_budi", "password": "keliru1"})) == "PIN_INVALID"
+    assert client.post("/api/auth/check", json={"username": "staf_budi", "password": "123456"}).json() == {"ok": True}
+
+
+def test_too_many_attempts_lock_survives_restart(env, tmp_path):
+    client, core, _ = env
+    enroll(client, core)
+    signup(client)
+    body = {"username": "staf_budi", "password": "keliru1"}
+    for _ in range(5):
+        assert code(client.post("/api/auth/check", json=body)) == "PIN_INVALID"
+    r = client.post("/api/auth/check", json={"username": "staf_budi", "password": "123456"})
+    assert r.status_code == 429 and code(r) == "TOO_MANY_ATTEMPTS"
+    assert code(login(client)) == "TOO_MANY_ATTEMPTS"
+    reopened = main.LoginGuard(core.login_guard.path)
+    with pytest.raises(main.HTTPException):
+        reopened.check("STAF_BUDI")
+
+
+def test_lock_expires_and_success_resets(env, monkeypatch):
+    client, core, _ = env
+    enroll(client, core)
+    signup(client)
+    for _ in range(4):
+        login(client, pin="keliru1")
+    assert login(client).status_code == 200
+    assert core.login_guard.state == {}
+    for _ in range(5):
+        login(client, pin="keliru1")
+    assert code(login(client)) == "TOO_MANY_ATTEMPTS"
+    real = main.time.time
+    monkeypatch.setattr(main.time, "time", lambda: real() + 31)
+    assert login(client).status_code == 200
 
 
 # ---------- Memo (AC-03) ----------
@@ -262,7 +383,36 @@ def test_vault_metadata_author_mismatch_detected(staff):
     pkg = json.loads(export_vault(client, make_memo(client)))
     pkg["metadata"]["author"] = "penyusup"
     res = import_vault(client, json.dumps(pkg).encode())
-    assert res["valid"] is False and res["status"] == "TAMPERED_CERTIFICATE" and res["decrypted_content"] is None
+    assert res["valid"] is False and res["status"] == "TAMPERED_PACKAGE" and res["decrypted_content"] is None
+
+
+def test_vault_title_and_category_tamper_detected(staff):
+    client, _, _ = staff
+    pkg = json.loads(export_vault(client, make_memo(client)))
+    pkg["metadata"]["title_plain"] = "Judul palsu"
+    res = import_vault(client, json.dumps(pkg).encode())
+    assert res["valid"] is False and res["status"] == "TAMPERED_PACKAGE" and res["decrypted_content"] is None
+    pkg = json.loads(export_vault(client, make_memo(client)))
+    pkg["metadata"]["category_plain"] = "BIASA"
+    assert import_vault(client, json.dumps(pkg).encode())["status"] == "TAMPERED_PACKAGE"
+
+
+def test_vault_forged_sender_on_other_computer_detected(staff, tmp_path):
+    client, core, _ = staff
+    pkg = json.loads(export_vault(client, make_memo(client)))
+    cert = pkg["blockchain_certificate"]
+    pkg["metadata"]["author"] = cert["author"] = "pejabat_palsu"
+    cert["nonce"], cert["block_hash"] = mine_pow(cert["block_index"], cert["timestamp"], cert["doc_uuid"], cert["author"], cert["payload_sha256"], cert["previous_hash"])
+    other = Blockchain(str(tmp_path / "rantai_komputer_lain.json"))
+    res = import_and_verify_vault(pkg, "arsip-kuartal-empat", other)
+    assert res["valid"] is False and res["status"] == "TAMPERED_PACKAGE"
+
+
+def test_vault_without_mac_rejected(staff):
+    client, _, _ = staff
+    pkg = json.loads(export_vault(client, make_memo(client)))
+    del pkg["integrity_mac"]
+    assert import_vault(client, json.dumps(pkg).encode())["status"] == "INVALID_FORMAT"
 
 
 @pytest.mark.parametrize("raw", [b"bukan json", b"[]", b'{"vault_version":"1.0"}', b"\xff\xfe"])
@@ -400,6 +550,97 @@ def test_db_tamper_reported_and_blocks_reads(staff):
     assert code(client.get("/api/documents")) == "DB_TAMPERED"
     a = client.get("/api/blockchain/audit").json()
     assert a["db"]["status"] == "TAMPERED" and a["db"]["expected"] != a["db"]["actual"]
+
+
+def rewrite_chain(core):
+    chain = json.load(open(core.paths.blockchain, encoding="utf-8"))
+    chain[1]["author"] = "penyusup"
+    prev = chain[0]["block_hash"]
+    for blk in chain[1:]:
+        blk["previous_hash"] = prev
+        blk["nonce"], blk["block_hash"] = mine_pow(blk["index"], blk["timestamp"], blk["doc_uuid"], blk["author"], blk["payload_sha256"], blk["previous_hash"])
+        prev = blk["block_hash"]
+    json.dump(chain, open(core.paths.blockchain, "w", encoding="utf-8"))
+
+
+def test_remined_chain_detected_and_restorable(staff):
+    client, core, _ = staff
+    memo = make_memo(client)
+    rewrite_chain(core)
+    a = client.get("/api/blockchain/audit").json()
+    assert a["chain_valid"] is False and "tanda tangan" in a["message"]
+    assert code(client.post("/api/documents", json={"title": "x", "category": "y", "content": "z"})) == "CHAIN_INVALID"
+    assert client.post("/api/system/restore", json={}).json() == {"restored": ["rantai blok"]}
+    a = client.get("/api/blockchain/audit").json()
+    assert a["chain_valid"] is True and a["chain"][1]["author"] == "staf_budi"
+    assert client.get(f"/api/documents/{memo['id']}").json()["verified"] is True
+
+
+def test_audit_catches_database_and_chain_disagreement(staff):
+    client, core, _ = staff
+    make_memo(client)
+    with sqlite3.connect(core.paths.db) as db:
+        db.execute("UPDATE documents SET block_hash='000palsu'")
+    core.db.update_checksum()
+    a = client.get("/api/blockchain/audit").json()
+    assert a["chain_valid"] is False and "catatan database" in a["message"]
+
+
+def test_recomputed_sha256_still_detected(staff):
+    client, core, _ = staff
+    make_memo(client)
+    with sqlite3.connect(core.paths.db) as db:
+        db.execute("UPDATE documents SET block_index=99")
+    open(core.paths.db_checksum, "w", encoding="ascii").write(hashlib.sha256(open(core.paths.db, "rb").read()).hexdigest())
+    st = client.get("/api/system/status").json()["db"]
+    assert st["status"] == "TAMPERED" and "HMAC" in st["message"]
+    assert code(client.get("/api/documents")) == "DB_TAMPERED"
+
+
+def test_tampered_database_restores_without_login(staff):
+    client, core, usb = staff
+    memo = make_memo(client)
+    client.post("/api/auth/logout", json={})
+    with open(core.paths.db, "ab") as f:
+        f.write(b"\x00")
+    assert code(login(client)) == "DB_TAMPERED"
+    assert client.get("/api/system/status").json()["db"]["ok"] is False
+    assert client.post("/api/system/restore", json={}).json() == {"restored": ["database"]}
+    assert client.get("/api/system/status").json()["db"]["ok"] is True
+    assert login(client).status_code == 200
+    assert client.get(f"/api/documents/{memo['id']}").json()["content"] == MEMO_TEXT
+
+
+def test_tampered_backup_is_not_restored(staff):
+    client, core, _ = staff
+    make_memo(client)
+    with open(core.paths.db, "ab") as f:
+        f.write(b"\x00")
+    with open(core.db.backup_path, "ab") as f:
+        f.write(b"\x01")
+    r = client.post("/api/system/restore", json={})
+    assert r.status_code == 409 and code(r) == "NO_BACKUP"
+
+
+def test_restore_needs_registered_dongle(staff, tmp_path, monkeypatch):
+    client, core, _ = staff
+    use_usb(monkeypatch, core, tmp_path / "usb_lain")
+    assert code(client.post("/api/system/restore", json={})) == "DONGLE_REQUIRED"
+
+
+def test_install_from_older_version_keeps_working(staff, tmp_path):
+    client, core, usb = staff
+    memo = make_memo(client)
+    for path in (core.db.hmac_path, core.db.backup_path, core.chain_sig_path, core.chain_backup_path, core.registry_path):
+        os.remove(path)
+    app = main.create_app(str(core.paths.root), test_mode=False)
+    with TestClient(app, base_url="http://127.0.0.1") as c:
+        app.state.core.monitor.refresh()
+        st = c.get("/api/system/status").json()
+        assert st["db"]["ok"] is True and st["dongle"]["valid"] is True
+        assert login(c).status_code == 200
+        assert c.get("/api/blockchain/audit").json()["chain_valid"] is True
+        assert c.get(f"/api/documents/{memo['id']}").json()["content"] == MEMO_TEXT
 
 
 # ---------- Pengamanan layanan lokal dan berkas antarmuka ----------

@@ -6,20 +6,26 @@ Error memakai `{"detail": {"code": "KODE", "message": "Kalimat untuk pengguna"}}
 
 ## Endpoint di luar tabel spesifikasi
 
-Frontend butuh tiga endpoint ini, dan `backend/` sudah punya fungsinya.
+Frontend butuh endpoint ini, dan semuanya sudah ada di `main.py`.
 
 | Metode | Path | Fungsi backend |
 | :--- | :--- | :--- |
 | `GET` | `/api/documents/{id}` | Mendekripsi isi memo dan menggabungkan data bloknya |
 | `GET` | `/api/documents/{id}/ciphertext` | Nilai tersimpan, IV-nya, dan `vigenere_256_encrypt` |
 | `DELETE` | `/api/documents/{id}` | `Database.delete_document` |
+| `POST` | `/api/auth/check` | Memeriksa akun dan PIN sebelum kamera dinyalakan |
+| `POST` | `/api/dongle/replace` | Mengganti dongle hilang dengan username, PIN, dan wajah |
+| `POST` | `/api/system/restore` | Memulihkan salinan database atau rantai blok yang HMAC-nya cocok |
 
 ## Bentuk data
 
 | Endpoint | Permintaan | Respons |
 | :--- | :--- | :--- |
-| `GET /api/system/status` | | `dongle` (hasil `validate_dongle`), `biometric` (hasil `detect_fingerprint_capability`), `db` (hasil `check_integrity`), `session` (`{username, full_name}` atau `null`), `test_mode` (bool) |
+| `GET /api/system/status` | | `dongle` (hasil `validate_dongle` ditambah `can_enroll`, dan `valid` hanya benar untuk dongle terdaftar), `biometric` (hasil `detect_fingerprint_capability`), `db` (hasil `check_integrity`), `session` (`{username, full_name}` atau `null`), `test_mode` (bool) |
 | `POST /api/dongle/enroll` | `{}` | hasil `enroll_dongle` |
+| `POST /api/dongle/replace` | `{username, password, face_image}` | hasil `enroll_dongle` |
+| `POST /api/system/restore` | `{}` | `{restored: [...]}` |
+| `POST /api/auth/check` | `{username, password}` | `{ok: true}` |
 | `POST /api/auth/register` | `{username, full_name, password, face_image}` | `{username, full_name}` |
 | `POST /api/auth/login` | `{username, password, face_image}` | `{username, full_name}` |
 | `POST /api/auth/logout` | `{}` | `{ok: true}` |
@@ -42,14 +48,18 @@ Frontend butuh tiga endpoint ini, dan `backend/` sudah punya fungsinya.
 
 | Kode | Dipakai pada | Tampilan |
 | :--- | :--- | :--- |
-| `CREDENTIALS_INVALID` | login | Kembali ke layar PIN |
+| `USER_NOT_FOUND` | cek akun, login | "Akun belum terdaftar" pada kolom username |
+| `PIN_INVALID` | cek akun, login | "PIN salah" pada kolom PIN |
+| `TOO_MANY_ATTEMPTS` | cek akun, login | Menampilkan sisa waktu tunggu |
+| `DONGLE_LOCKED` | daftar dongle | Pendaftaran tanpa login ditolak, tampilkan "Ganti dongle" |
+| `DB_TAMPERED` | semua data | Layar "Database berubah" dengan tombol pulihkan |
 | `FACE_MISMATCH` | login | Layar akses ditolak |
 | `NO_FACE` | login, registrasi | Minta ambil gambar ulang |
 | `FACE_NOT_ENROLLED` | login | Minta daftar ulang |
 | `USERNAME_TAKEN` | registrasi | Pesan pada kolom username |
 | `PASSPHRASE_REQUIRED` | ekstrak stego | Minta isi passphrase |
 
-Login tetap satu permintaan: frontend mengumpulkan PIN dan foto wajah, lalu mengirim keduanya. Backend menolak salah satu lewat kode di atas.
+Frontend memanggil `/api/auth/check` sebelum kamera menyala, jadi akun belum terdaftar atau PIN salah langsung terlihat. `/api/auth/login` tetap memeriksa keduanya lagi bersama wajah.
 
 ## Kebutuhan jendela desktop
 

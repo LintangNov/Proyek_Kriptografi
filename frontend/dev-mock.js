@@ -27,14 +27,18 @@
     const key = `${method} ${path}`;
     if (M.fail && path.startsWith(M.fail)) { await wait(150); return fail(500, "ERROR", "Layanan lokal AegisVault tidak merespons. Muat ulang, atau buka ulang aplikasi kalau masalah berlanjut."); }
     if (key === "GET /api/system/status") {
-      return json({ dongle: { valid: M.dongle === "valid", connected: M.dongle !== "none", reason: M.dongle === "wrong" ? "Berkas dongle.key tidak ditemukan atau formatnya rusak." : "" }, biometric: { fingerprint_available: false, active_mode: "FACE_RECOGNITION" }, db: { status: M.dbBad ? "TAMPERED" : "OK" }, session: M.session, test_mode: true });
+      return json({ dongle: { valid: M.dongle === "valid", connected: M.dongle !== "none", can_enroll: false, reason: M.dongle === "wrong" ? "USB ini bukan dongle yang terdaftar di komputer ini." : "" }, biometric: { fingerprint_available: false, active_mode: "FACE_RECOGNITION" }, db: { ok: !M.dbBad, status: M.dbBad ? "TAMPERED" : "OK", expected: M.dbBad ? "a".repeat(64) : null, actual: M.dbBad ? "b".repeat(64) : null }, session: M.session, test_mode: true });
     }
     await wait(500);
-    if (key === "POST /api/dongle/enroll") { if (M.dongle === "none") return fail(400, "NO_DRIVE", "Tidak ada USB terdeteksi. Tancapkan flashdisk, lalu coba lagi."); M.dongle = "valid"; sync(); return json({ enrolled: true }); }
+    if (key === "POST /api/dongle/enroll") return fail(403, "DONGLE_LOCKED", "Komputer ini sudah punya dongle terdaftar.");
+    if (key === "POST /api/dongle/replace") { if (M.dongle === "none") return fail(400, "NO_DRIVE", "Tidak ada USB terdeteksi. Tancapkan flashdisk, lalu coba lagi."); M.dongle = "valid"; sync(); M.session = null; return json({ enrolled: true }); }
+    if (key === "POST /api/system/restore") { const was = M.dbBad || M.chainBad; M.dbBad = false; M.chainBad = false; return json({ restored: was ? ["database"] : [] }); }
+    if (key === "POST /api/auth/check") { if (!M.users[body.username]) return fail(404, "USER_NOT_FOUND", "Akun belum terdaftar."); if (body.password !== M.pin) return fail(401, "PIN_INVALID", "PIN salah."); return json({ ok: true }); }
     if (key === "POST /api/auth/register") { if (M.users[body.username]) return fail(409, "USERNAME_TAKEN", "Username sudah dipakai."); M.users[body.username] = body.full_name; return json({ username: body.username, full_name: body.full_name }); }
     if (key === "POST /api/auth/login") {
       await wait(900);
-      if (!M.users[body.username] || body.password !== M.pin) return fail(401, "CREDENTIALS_INVALID", "Username atau PIN salah.");
+      if (!M.users[body.username]) return fail(404, "USER_NOT_FOUND", "Akun belum terdaftar.");
+      if (body.password !== M.pin) return fail(401, "PIN_INVALID", "PIN salah.");
       if (M.face === "tolak") return fail(401, "FACE_MISMATCH", "Wajah tidak cocok.");
       if (M.face === "kosong") return fail(422, "NO_FACE", "Wajah tidak terdeteksi.");
       M.session = { username: body.username, full_name: M.users[body.username] };

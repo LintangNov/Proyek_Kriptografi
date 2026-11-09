@@ -18,6 +18,7 @@ import io
 import json
 import os
 import secrets
+import shutil
 import socket
 import sys
 import threading
@@ -72,6 +73,9 @@ HOST = "127.0.0.1"
 SESSION_COOKIE = "aegis_session"
 MIN_PIN_LENGTH = 6
 MIN_PASSPHRASE_LENGTH = 8
+MAX_LOGIN_FAILURES = 5
+LOCK_BASE_SECONDS = 30
+LOCK_MAX_SECONDS = 15 * 60
 MAX_VAULT_BYTES = 5 * 1024 * 1024
 MAX_IMAGE_BYTES = config.MAX_ATTACHMENT_BYTES
 USERNAME_HELP = "Pakai huruf, angka, titik, garis bawah, atau tanda hubung, tanpa spasi."
@@ -111,6 +115,51 @@ class ExportBody(BaseModel):
     passphrase: str
 
 
+class CheckBody(BaseModel):
+    username: str
+    password: str
+
+
+class LoginGuard:
+    """Membatasi tebakan per username. Disimpan ke file supaya tidak hilang saat aplikasi dibuka ulang."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self.lock = threading.Lock()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                self.state: Dict[str, Dict[str, float]] = json.load(f)
+        except (OSError, ValueError):
+            self.state = {}
+
+    def _save(self) -> None:
+        temp_path = self.path + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(self.state, f)
+        os.replace(temp_path, self.path)
+
+    def check(self, username: str) -> None:
+        with self.lock:
+            until = self.state.get(username.lower(), {}).get("until", 0)
+        remaining = int(until - time.time()) + 1
+        if until > time.time():
+            fail(429, "TOO_MANY_ATTEMPTS", f"Terlalu banyak percobaan gagal. Coba lagi dalam {remaining} detik.")
+
+    def failed(self, username: str) -> None:
+        with self.lock:
+            entry = self.state.setdefault(username.lower(), {"fails": 0, "until": 0})
+            entry["fails"] += 1
+            if entry["fails"] >= MAX_LOGIN_FAILURES:
+                wait = LOCK_BASE_SECONDS * 2 ** (int(entry["fails"]) - MAX_LOGIN_FAILURES)
+                entry["until"] = time.time() + min(wait, LOCK_MAX_SECONDS)
+            self._save()
+
+    def reset(self, username: str) -> None:
+        with self.lock:
+            if self.state.pop(username.lower(), None) is not None:
+                self._save()
+
+
 @dataclass
 class Session:
     token: str
@@ -135,7 +184,17 @@ class Core:
     def __init__(self, storage_dir: Optional[str], test_mode: bool):
         self.paths = config.ensure_storage_dirs(storage_dir)
         self.test_mode = test_mode
+        # Data dari versi sebelum ada HMAC diterima sekali, selama SHA-256-nya masih cocok.
+        self.legacy_install = os.path.exists(self.paths.db) and not os.path.exists(self.paths.db + ".hmac")
         self.db = Database(storage_dir)
+        if self.legacy_install:
+            self.db.adopt_legacy_checksum()
+        self.key = self.db.integrity_key
+        self.chain_sig_path = self.paths.blockchain + ".sig"
+        self.chain_backup_path = self.paths.blockchain + ".bak"
+        self.registry_path = os.path.join(self.paths.root, "dongle_registry.json")
+        self.registry_lock = threading.RLock()
+        self.login_guard = LoginGuard(os.path.join(self.paths.root, "login_attempts.json"))
         self.guard = DongleGuard()
         self.monitor = DongleMonitor(self.guard)
         # Dibaca sekali saja, karena frontend meminta status setiap detik.
@@ -143,8 +202,94 @@ class Core:
         self.session: Optional[Session] = None
         self.chain_lock = threading.RLock()
         self.ledger_warning = ""
+        fresh_ledger = not os.path.exists(self.paths.blockchain)
         self._preserve_corrupt_ledger()
         self.ledger = Blockchain(self.paths.blockchain)
+        if fresh_ledger or self.legacy_install:
+            self.sign_chain()
+
+    # ---------- Tanda tangan buku besar ----------
+
+    def _chain_mac(self, chain: List[Dict[str, Any]]) -> str:
+        canonical = json.dumps(chain, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        return hmac.new(self.key, b"AegisVault-Chain-v1" + canonical, hashlib.sha256).hexdigest()
+
+    def sign_chain(self) -> None:
+        """Hanya aplikasi yang punya kunci, jadi rantai yang ditambang ulang di luar aplikasi tertangkap."""
+        with open(self.chain_sig_path + ".tmp", "w", encoding="ascii") as f:
+            f.write(self._chain_mac(self.ledger.chain))
+        os.replace(self.chain_sig_path + ".tmp", self.chain_sig_path)
+        shutil.copyfile(self.paths.blockchain, self.chain_backup_path + ".tmp")
+        os.replace(self.chain_backup_path + ".tmp", self.chain_backup_path)
+
+    def chain_signature_ok(self) -> bool:
+        try:
+            with open(self.chain_sig_path, "r", encoding="ascii", errors="replace") as f:
+                return hmac.compare_digest(f.read().strip(), self._chain_mac(self.ledger.chain))
+        except OSError:
+            return False
+
+    def restore_chain(self) -> bool:
+        with self.chain_lock:
+            try:
+                with open(self.chain_backup_path, "r", encoding="utf-8") as f:
+                    chain = json.load(f)
+                with open(self.chain_sig_path, "r", encoding="ascii", errors="replace") as f:
+                    if not hmac.compare_digest(f.read().strip(), self._chain_mac(chain)):
+                        return False
+            except (OSError, ValueError):
+                return False
+            shutil.copyfile(self.chain_backup_path, self.paths.blockchain + ".restore")
+            os.replace(self.paths.blockchain + ".restore", self.paths.blockchain)
+            self.ledger.chain = chain
+            self.ledger_warning = ""
+            return True
+
+    # ---------- Dongle terdaftar ----------
+
+    def _registry_mac(self, dongle_id: str) -> str:
+        return hmac.new(self.key, b"AegisVault-Dongle-v1" + dongle_id.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    def registered_dongle(self) -> Optional[str]:
+        """None berarti belum ada dongle. String kosong berarti file catatannya sudah diubah."""
+        try:
+            with open(self.registry_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            dongle_id = data["dongle_id"]
+            return dongle_id if hmac.compare_digest(data["mac"], self._registry_mac(dongle_id)) else ""
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, KeyError, TypeError):
+            return ""
+
+    def register_dongle(self, dongle_id: str) -> None:
+        with self.registry_lock:
+            temp_path = self.registry_path + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump({"dongle_id": dongle_id, "mac": self._registry_mac(dongle_id)}, f)
+            os.replace(temp_path, self.registry_path)
+
+    def has_users(self) -> bool:
+        try:
+            return bool(self.db.get_raw_rows("users"))
+        except DatabaseIntegrityError:
+            return True
+
+    def dongle_status(self) -> Dict[str, Any]:
+        """Status monitor hanya membuktikan USB bertanda tangan sah. Di sini USB-nya harus yang terdaftar."""
+        status = self.monitor.get_status()
+        with self.registry_lock:
+            registered = self.registered_dongle()
+            empty = registered is None and not self.has_users()
+            # Komputer baru, atau data versi lama: dongle sah pertama menjadi dongle terdaftar.
+            if registered is None and status.get("valid") and (empty or self.legacy_install):
+                self.register_dongle(status["dongle_id"])
+                registered = status["dongle_id"]
+                self.legacy_install = False
+        if status.get("valid") and status.get("dongle_id") != registered:
+            status.update(valid=False, reason="USB ini bukan dongle yang terdaftar di komputer ini.")
+        status["can_enroll"] = empty and registered is None
+        return status
 
     def _preserve_corrupt_ledger(self) -> None:
         """Blockchain() menimpa file rusak dengan rantai baru, jadi file itu diamankan sebagai bukti audit."""
@@ -178,9 +323,12 @@ class Core:
             if not ok:
                 return False, message
             try:
-                return self.ledger.is_chain_valid()
+                valid, message = self.ledger.is_chain_valid()
             except (KeyError, TypeError, AttributeError):
                 return False, "Struktur data blok rusak."
+            if valid and not self.chain_signature_ok():
+                return False, "Rantai blok berubah dari luar aplikasi: tanda tangan rantai tidak cocok."
+            return valid, message
 
     def seal(self, doc_uuid: str, author: str, asset_type: str, payload_sha256: str) -> Dict[str, Any]:
         with self.chain_lock:
@@ -188,7 +336,34 @@ class Core:
             ok, message = self.check_chain()
             if not ok:
                 fail(409, "CHAIN_INVALID", f"Rantai blok tidak valid, jadi aplikasi menolak menyegel data baru. {message}")
-            return self.ledger.mine_new_block(doc_uuid, author, asset_type, payload_sha256)
+            block = self.ledger.mine_new_block(doc_uuid, author, asset_type, payload_sha256)
+            self.sign_chain()
+            return block
+
+    def verify_user(self, username: str, password: str) -> Dict[str, Any]:
+        """Memeriksa username dan PIN, sekaligus menghitung tebakan yang gagal."""
+        self.login_guard.check(username)
+        user = self.db.get_user(username)
+        if not user:
+            self.login_guard.failed(username)
+            fail(404, "USER_NOT_FOUND", "Akun belum terdaftar.")
+        if not verify_password(password, user["password_salt"], user["password_hash"]):
+            self.login_guard.failed(username)
+            fail(401, "PIN_INVALID", "PIN salah.")
+        return user
+
+    def verify_user_face(self, username: str, face_image: str) -> None:
+        try:
+            result = biometric.verify_face(username, face_image, str(self.paths.root))
+        except biometric.FaceNotEnrolledError:
+            fail(409, "FACE_NOT_ENROLLED", "Akun ini belum punya data wajah. Daftarkan ulang staf.")
+        except biometric.NoFaceDetectedError:
+            fail(422, "NO_FACE", "Aplikasi tidak menemukan wajah pada gambar.")
+        except biometric.InvalidImageError:
+            fail(422, "INVALID_IMAGE", "Gambar tidak bisa dibaca. Ambil gambar lagi.")
+        if not result["match"]:
+            self.login_guard.failed(username)
+            fail(401, "FACE_MISMATCH", "Wajah tidak cocok.")
 
     def block_of(self, doc_uuid: str) -> Optional[Dict[str, Any]]:
         with self.chain_lock:
@@ -202,7 +377,7 @@ class Core:
         return report
 
     def require_dongle(self) -> None:
-        if not self.monitor.get_status().get("valid"):
+        if not self.dongle_status().get("valid"):
             fail(423, "DONGLE_REQUIRED", "Dongle tidak terdeteksi. Tancapkan dongle untuk melanjutkan.")
 
     def current(self, token: Optional[str]) -> Optional[Session]:
@@ -268,23 +443,56 @@ def create_app(storage_dir: Optional[str] = None, test_mode: Optional[bool] = No
     def system_status(aegis_session: Optional[str] = Cookie(default=None)):
         session = core.current(aegis_session)
         return {
-            "dongle": core.monitor.get_status(),
+            "dongle": core.dongle_status(),
             "biometric": core.biometric,
             "db": core.db_report(),
             "session": session.public if session else None,
             "test_mode": core.test_mode,
         }
 
-    @app.post("/api/dongle/enroll")
-    def dongle_enroll():
+    def write_dongle() -> Dict[str, Any]:
         try:
             result = core.guard.enroll_dongle()
         except MultipleDrivesError:
             fail(409, "MULTIPLE_DRIVES", "Ada lebih dari satu USB tertancap. Sisakan satu USB, lalu coba lagi.")
         except DongleError as exc:
             fail(400, "NO_DRIVE", str(exc))
+        core.register_dongle(result["dongle_id"])
         core.monitor.refresh()
         return result
+
+    @app.post("/api/dongle/enroll")
+    def dongle_enroll():
+        # Tanpa login hanya boleh saat komputer ini belum punya dongle dan belum punya staf.
+        if not core.dongle_status()["can_enroll"]:
+            fail(403, "DONGLE_LOCKED", "Komputer ini sudah punya dongle terdaftar. Tancapkan dongle itu, atau ganti dengan akun staf.")
+        return write_dongle()
+
+    @app.post("/api/dongle/replace")
+    def dongle_replace(body: LoginBody):
+        # Untuk dongle hilang: dongle lama langsung tidak berlaku, dan sesi aktif berakhir.
+        username = body.username.strip()
+        core.verify_user(username, body.password)
+        core.verify_user_face(username, body.face_image)
+        result = write_dongle()
+        core.login_guard.reset(username)
+        core.session = None
+        return result
+
+    @app.post("/api/system/restore")
+    def system_restore():
+        core.require_dongle()
+        restored: List[str] = []
+        if not core.db.check_integrity()["ok"]:
+            if not core.db.restore_backup():
+                fail(409, "NO_BACKUP", "Salinan database yang utuh tidak ditemukan, jadi database tidak bisa dipulihkan.")
+            restored.append("database")
+        valid, _message = core.check_chain()
+        if not valid or core.ledger_warning:
+            if not core.restore_chain():
+                fail(409, "NO_BACKUP", "Salinan rantai blok yang utuh tidak ditemukan, jadi rantai tidak bisa dipulihkan.")
+            restored.append("rantai blok")
+        return {"restored": restored}
 
     # ---------- Autentikasi ----------
 
@@ -317,23 +525,19 @@ def create_app(storage_dir: Optional[str] = None, test_mode: Optional[bool] = No
             raise
         return {"username": username, "full_name": full_name}
 
+    @app.post("/api/auth/check")
+    def auth_check(body: CheckBody):
+        """Memeriksa akun dan PIN sebelum kamera dinyalakan."""
+        core.verify_user(body.username.strip(), body.password)
+        return {"ok": True}
+
     @app.post("/api/auth/login")
     def login(body: LoginBody):
         core.require_dongle()
         username = body.username.strip()
-        user = core.db.get_user(username)
-        if not user or not verify_password(body.password, user["password_salt"], user["password_hash"]):
-            fail(401, "CREDENTIALS_INVALID", "Username atau PIN salah.")
-        try:
-            result = biometric.verify_face(username, body.face_image, str(core.paths.root))
-        except biometric.FaceNotEnrolledError:
-            fail(409, "FACE_NOT_ENROLLED", "Akun ini belum punya data wajah. Daftarkan ulang staf.")
-        except biometric.NoFaceDetectedError:
-            fail(422, "NO_FACE", "Aplikasi tidak menemukan wajah pada gambar.")
-        except biometric.InvalidImageError:
-            fail(422, "INVALID_IMAGE", "Gambar tidak bisa dibaca. Ambil gambar lagi.")
-        if not result["match"]:
-            fail(401, "FACE_MISMATCH", "Wajah tidak cocok.")
+        user = core.verify_user(username, body.password)
+        core.verify_user_face(username, body.face_image)
+        core.login_guard.reset(username)
         k1, k2 = derive_keys(body.password, bytes.fromhex(user["password_salt"]))
         core.session = Session(secrets.token_urlsafe(32), username, user["full_name_enc"], k1, k2)
         response = JSONResponse(core.session.public)
@@ -550,7 +754,19 @@ def create_app(storage_dir: Optional[str] = None, test_mode: Optional[bool] = No
             chain = list(core.ledger.chain)
         if core.ledger_warning and valid:
             valid, message = False, core.ledger_warning
-        return {"chain": chain, "chain_valid": valid, "message": message, "db": core.db_report()}
+        report = core.db_report()
+        if valid and report["ok"]:
+            # Database menyimpan hash asli tiap blok, jadi keduanya harus saling cocok.
+            by_uuid = {b["doc_uuid"]: b for b in chain}
+            rows = [(r["doc_uuid"], r["block_hash"]) for r in core.db.get_raw_rows("documents")]
+            rows += [(r["att_uuid"], r["block_hash"]) for r in core.db.get_raw_rows("attachments")]
+            for item_uuid, block_hash in rows:
+                block = by_uuid.get(item_uuid)
+                if not block or block["block_hash"] != block_hash:
+                    index = block["index"] if block else "?"
+                    valid, message = False, f"Hash blok ke-{index} tidak cocok dengan catatan database."
+                    break
+        return {"chain": chain, "chain_valid": valid, "message": message, "db": report}
 
     # ---------- Berkas antarmuka ----------
 
