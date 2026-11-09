@@ -179,6 +179,7 @@ Menggunakan metode **Least Significant Bit (LSB)** pada citra RGB 24-bit (3 byte
    * Baca 32 piksel kanal warna pertama (32 bit pertama) dari gambar `.png`, susun menjadi integer 32-bit Big-Endian untuk mendapatkan nilai panjang $L$.
    * Validasi bahwa $0 < L \le \text{MaxPayloadBytes}$.
    * Baca tepat $L \times 8$ bit berikutnya dari LSB piksel gambar, susun kembali menjadi byte array, dan kembalikan pesan teksnya (atau dekripsi jika diawali `"ENC:"`).
+5. **Kemiripan dengan Gambar Asli:** Bit LSB hanya disisipkan pada kanal R, G, dan B. Hasil PNG mempertahankan kanal alfa, profil warna, DPI, dan arah putar foto dari EXIF. Gambar 16-bit diturunkan ke 8-bit per kanal. API melaporkan PSNR dan jumlah nilai warna yang berubah.
 
 ### 3.7 Modul 7: Sertifikat Keaslian Blockchain & Paket `.vault` (`backend/blockchain_ledger.py`)
 
@@ -247,7 +248,7 @@ Saat staf mengekspor memo untuk dikirim ke staf lain, aplikasi menghasilkan file
 | `GET` | `/api/system/status` | Mengecek status USB Dongle, kapabilitas sensor Fingerprint/Webcam, status integritas Checksum DB, dan sesi user aktif. |
 | `POST` | `/api/dongle/enroll` | Mendaftarkan USB Flashdisk yang sedang tertancap dan membuat file `dongle.key` di dalamnya. |
 | `POST` | `/api/auth/register` | Mendaftarkan akun staf baru (simpan hash PIN SHA-256 + matriks wajah dari base64 webcam). |
-| `POST` | `/api/auth/check` | Memeriksa akun dan PIN sebelum kamera dinyalakan. Setelah 5 kali gagal, percobaan ditahan mulai 30 detik. |
+| `POST` | `/api/auth/check` | Memeriksa akun dan PIN sebelum kamera dinyalakan. |
 | `POST` | `/api/auth/login` | Memverifikasi PIN SHA-256 dan kecocokan biometrik wajah staf. |
 | `POST` | `/api/dongle/replace` | Mengganti dongle hilang dengan username, PIN, dan wajah. |
 | `POST` | `/api/system/restore` | Memulihkan salinan terakhir database atau rantai blok yang terbukti utuh. |
@@ -259,6 +260,7 @@ Saat staf mengekspor memo untuk dikirim ke staf lain, aplikasi menghasilkan file
 | `GET` | `/api/attachments` | Mengambil daftar berkas di dalam Brankas File (RC4 Vault). |
 | `POST` | `/api/attachments/upload` | Mengunggah berkas, mengenkripsinya dengan RC4 Stream Cipher, dan mencatat sertifikatnya ke Blockchain. |
 | `GET` | `/api/attachments/{id}/download` | Mendekripsi berkas `.rc4` dan mengunduhnya kembali ke format berkas asli. |
+| `GET` | `/api/attachments/{id}/download-encrypted` | Mengunduh berkas `.rc4` apa adanya tanpa dekripsi. |
 | `POST` | `/api/stego/embed` | Menerima file gambar, pesan rahasia, dan passphrase opsional, lalu mengembalikan file gambar `.png` hasil Steganografi LSB. |
 | `POST` | `/api/stego/extract` | Menerima file gambar `.png` steganografi dan mengekstrak pesan rahasia di dalamnya. |
 | `GET` | `/api/blockchain/audit` | Mengambil seluruh rantai blok serta hasil audit validitas tiap blok dan *Database Checksum*. |

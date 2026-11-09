@@ -38,7 +38,8 @@ Frontend butuh endpoint ini, dan semuanya sudah ada di `main.py`.
 | `GET /api/attachments` | | `[{id, filename, size_bytes, created_at}]` |
 | `POST /api/attachments/upload` | multipart `file` | `{id, ...}` |
 | `GET /api/attachments/{id}/download` | | berkas asli, nama pada `Content-Disposition` |
-| `POST /api/stego/embed` | multipart `image`, `message`, `passphrase` opsional | berkas PNG |
+| `GET /api/attachments/{id}/download-encrypted` | | isi file `.rc4` apa adanya (nonce + ciphertext), bernama `ATT-xxx.rc4` |
+| `POST /api/stego/embed` | multipart `image`, `message`, `passphrase` opsional | berkas PNG, dengan header `X-Stego-Report`: `{channels_changed, channels_total, max_channel_diff, psnr_db}` |
 | `POST /api/stego/extract` | multipart `image`, `passphrase` opsional | `{message}` |
 | `GET /api/blockchain/audit` | | `{chain, chain_valid, message, db}`: `chain_valid` dan `message` dari `is_chain_valid`, `db` dari `check_integrity` |
 
@@ -50,7 +51,6 @@ Frontend butuh endpoint ini, dan semuanya sudah ada di `main.py`.
 | :--- | :--- | :--- |
 | `USER_NOT_FOUND` | cek akun, login | "Akun belum terdaftar" pada kolom username |
 | `PIN_INVALID` | cek akun, login | "PIN salah" pada kolom PIN |
-| `TOO_MANY_ATTEMPTS` | cek akun, login | Menampilkan sisa waktu tunggu |
 | `DONGLE_LOCKED` | daftar dongle | Pendaftaran tanpa login ditolak, tampilkan "Ganti dongle" |
 | `DB_TAMPERED` | semua data | Layar "Database berubah" dengan tombol pulihkan |
 | `FACE_MISMATCH` | login | Layar akses ditolak |

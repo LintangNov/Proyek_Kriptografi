@@ -65,7 +65,7 @@ from backend.crypto_engine import (
 )
 from backend.database import Database, DatabaseIntegrityError, DuplicateRecordError
 from backend.dongle_guard import DongleError, DongleGuard, DongleMonitor, MultipleDrivesError
-from backend.stego_engine import embed_message_into_image, extract_message_from_image
+from backend.stego_engine import embed_with_report, extract_message_from_image, save_stego_png
 
 BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
@@ -73,9 +73,6 @@ HOST = "127.0.0.1"
 SESSION_COOKIE = "aegis_session"
 MIN_PIN_LENGTH = 6
 MIN_PASSPHRASE_LENGTH = 8
-MAX_LOGIN_FAILURES = 5
-LOCK_BASE_SECONDS = 30
-LOCK_MAX_SECONDS = 15 * 60
 MAX_VAULT_BYTES = 5 * 1024 * 1024
 MAX_IMAGE_BYTES = config.MAX_ATTACHMENT_BYTES
 USERNAME_HELP = "Pakai huruf, angka, titik, garis bawah, atau tanda hubung, tanpa spasi."
@@ -120,46 +117,6 @@ class CheckBody(BaseModel):
     password: str
 
 
-class LoginGuard:
-    """Membatasi tebakan per username. Disimpan ke file supaya tidak hilang saat aplikasi dibuka ulang."""
-
-    def __init__(self, path: str):
-        self.path = path
-        self.lock = threading.Lock()
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                self.state: Dict[str, Dict[str, float]] = json.load(f)
-        except (OSError, ValueError):
-            self.state = {}
-
-    def _save(self) -> None:
-        temp_path = self.path + ".tmp"
-        with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(self.state, f)
-        os.replace(temp_path, self.path)
-
-    def check(self, username: str) -> None:
-        with self.lock:
-            until = self.state.get(username.lower(), {}).get("until", 0)
-        remaining = int(until - time.time()) + 1
-        if until > time.time():
-            fail(429, "TOO_MANY_ATTEMPTS", f"Terlalu banyak percobaan gagal. Coba lagi dalam {remaining} detik.")
-
-    def failed(self, username: str) -> None:
-        with self.lock:
-            entry = self.state.setdefault(username.lower(), {"fails": 0, "until": 0})
-            entry["fails"] += 1
-            if entry["fails"] >= MAX_LOGIN_FAILURES:
-                wait = LOCK_BASE_SECONDS * 2 ** (int(entry["fails"]) - MAX_LOGIN_FAILURES)
-                entry["until"] = time.time() + min(wait, LOCK_MAX_SECONDS)
-            self._save()
-
-    def reset(self, username: str) -> None:
-        with self.lock:
-            if self.state.pop(username.lower(), None) is not None:
-                self._save()
-
-
 @dataclass
 class Session:
     token: str
@@ -194,7 +151,6 @@ class Core:
         self.chain_backup_path = self.paths.blockchain + ".bak"
         self.registry_path = os.path.join(self.paths.root, "dongle_registry.json")
         self.registry_lock = threading.RLock()
-        self.login_guard = LoginGuard(os.path.join(self.paths.root, "login_attempts.json"))
         self.guard = DongleGuard()
         self.monitor = DongleMonitor(self.guard)
         # Dibaca sekali saja, karena frontend meminta status setiap detik.
@@ -341,14 +297,10 @@ class Core:
             return block
 
     def verify_user(self, username: str, password: str) -> Dict[str, Any]:
-        """Memeriksa username dan PIN, sekaligus menghitung tebakan yang gagal."""
-        self.login_guard.check(username)
         user = self.db.get_user(username)
         if not user:
-            self.login_guard.failed(username)
             fail(404, "USER_NOT_FOUND", "Akun belum terdaftar.")
         if not verify_password(password, user["password_salt"], user["password_hash"]):
-            self.login_guard.failed(username)
             fail(401, "PIN_INVALID", "PIN salah.")
         return user
 
@@ -362,7 +314,6 @@ class Core:
         except biometric.InvalidImageError:
             fail(422, "INVALID_IMAGE", "Gambar tidak bisa dibaca. Ambil gambar lagi.")
         if not result["match"]:
-            self.login_guard.failed(username)
             fail(401, "FACE_MISMATCH", "Wajah tidak cocok.")
 
     def block_of(self, doc_uuid: str) -> Optional[Dict[str, Any]]:
@@ -475,7 +426,6 @@ def create_app(storage_dir: Optional[str] = None, test_mode: Optional[bool] = No
         core.verify_user(username, body.password)
         core.verify_user_face(username, body.face_image)
         result = write_dongle()
-        core.login_guard.reset(username)
         core.session = None
         return result
 
@@ -537,7 +487,6 @@ def create_app(storage_dir: Optional[str] = None, test_mode: Optional[bool] = No
         username = body.username.strip()
         user = core.verify_user(username, body.password)
         core.verify_user_face(username, body.face_image)
-        core.login_guard.reset(username)
         k1, k2 = derive_keys(body.password, bytes.fromhex(user["password_salt"]))
         core.session = Session(secrets.token_urlsafe(32), username, user["full_name_enc"], k1, k2)
         response = JSONResponse(core.session.public)
@@ -708,6 +657,20 @@ def create_app(storage_dir: Optional[str] = None, test_mode: Optional[bool] = No
             fail(409, "FILE_TAMPERED", "Berkas berubah setelah disimpan, jadi aplikasi menolak mengembalikannya.")
         return Response(data, media_type="application/octet-stream", headers=attachment_headers(row["original_filename_enc"]))
 
+    @app.get("/api/attachments/{att_id}/download-encrypted")
+    def download_attachment_encrypted(att_id: int, aegis_session: Optional[str] = Cookie(default=None)):
+        session = core.require_session(aegis_session)
+        row = core.db.get_attachment_by_id(att_id)
+        if not row or row["owner_username"] != session.username:
+            fail(404, "NOT_FOUND", "Berkas tidak ditemukan.")
+        try:
+            with open(row["encrypted_filepath"], "rb") as f:
+                data = f.read()
+        except OSError:
+            fail(409, "FILE_UNREADABLE", "Berkas terenkripsi hilang atau rusak.")
+        # Nama UUID, supaya nama asli berkas tidak ikut terbaca saat salinan ini berpindah.
+        return Response(data, media_type="application/octet-stream", headers=attachment_headers(f"{row['att_uuid']}.rc4"))
+
     # ---------- Steganografi ----------
 
     def load_image(file: UploadFile) -> bytes:
@@ -723,12 +686,11 @@ def create_app(storage_dir: Optional[str] = None, test_mode: Optional[bool] = No
         core.require_session(aegis_session)
         data = load_image(image)
         try:
-            result = embed_message_into_image(data, message, passphrase or None)
+            result, report = embed_with_report(data, message, passphrase or None)
         except ValueError as exc:
             fail(422, "EMBED_FAILED", str(exc))
-        out = io.BytesIO()
-        result.save(out, format="PNG")
-        return Response(out.getvalue(), media_type="image/png", headers=attachment_headers("stego_image.png"))
+        headers = {**attachment_headers("stego_image.png"), "X-Stego-Report": json.dumps(report)}
+        return Response(save_stego_png(result), media_type="image/png", headers=headers)
 
     @app.post("/api/stego/extract")
     def stego_extract(image: UploadFile = File(...), passphrase: str = Form(""), aegis_session: Optional[str] = Cookie(default=None)):

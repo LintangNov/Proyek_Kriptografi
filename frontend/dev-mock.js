@@ -69,6 +69,7 @@
     }
     if (key === "GET /api/attachments") return json(M.files);
     if (key === "POST /api/attachments/upload") { await wait(800); const f = form.get("file"); M.files.unshift({ id: M.nextId++, filename: f.name, size_bytes: f.size, created_at: "2026-11-10T08:00:00Z" }); return json({ ok: true }); }
+    if (/^\/api\/attachments\/.+\/download-encrypted$/.test(path)) return blob("nonce dan ciphertext contoh", "ATT-CONTOH.rc4", "application/octet-stream");
     if (/^\/api\/attachments\/.+\/download$/.test(path)) return blob("isi contoh", "berkas-contoh.txt", "text/plain");
     if (key === "POST /api/stego/embed") return blob("png contoh", "stego_image.png", "image/png");
     if (key === "POST /api/stego/extract") { const n = form.get("image").name; if (n.includes("chat")) return fail(422, "NO_MESSAGE", "Gambar ini tidak memuat pesan yang bisa dibaca. Minta pengirim mengirim PNG asli sebagai dokumen, bukan foto."); return json({ message: "Rapat Anggaran Rahasia 2026!" }); }

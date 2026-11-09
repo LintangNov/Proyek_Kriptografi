@@ -11,10 +11,11 @@ Catatan Kepatuhan Regulasi Kode:
 """
 
 import io
+import math
 import os
-from typing import Union
+from typing import Any, Dict, Optional, Tuple, Union
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 from backend.crypto_engine import (
     generate_salt,
@@ -63,14 +64,90 @@ def _load_image_rgb(image_input: Union[str, Image.Image, bytes]) -> Image.Image:
     return img
 
 
+def _load_cover(image_input: Union[str, Image.Image, bytes]) -> Tuple[Image.Image, Optional[Image.Image], Dict[str, Any]]:
+    """
+    Memuat gambar sampul agar hasilnya tampak sama dengan aslinya.
+    Mengembalikan (citra RGB, kanal alfa atau None, metadata tampilan).
+    """
+    if isinstance(image_input, Image.Image):
+        img = image_input
+    elif isinstance(image_input, str):
+        if not os.path.exists(image_input):
+            raise FileNotFoundError(f"File citra tidak ditemukan: {image_input}")
+        img = Image.open(image_input)
+    elif isinstance(image_input, (bytes, bytearray)):
+        img = Image.open(io.BytesIO(image_input))
+    else:
+        raise ValueError("Tipe input citra tidak didukung.")
+
+    info = {key: img.info[key] for key in ("dpi", "gamma") if key in img.info}
+    # Profil warna CMYK tidak berlaku lagi setelah gambar menjadi RGB.
+    if img.mode != "CMYK" and img.info.get("icc_profile"):
+        info["icc_profile"] = img.info["icc_profile"]
+
+    # Foto HP menyimpan arah putar di EXIF. PNG hasil tidak membawa EXIF, jadi pikselnya yang diputar.
+    img = ImageOps.exif_transpose(img)
+
+    # Konversi langsung memotong nilai 16-bit ke 255 sehingga gambar menjadi putih.
+    if img.mode.startswith("I") or img.mode == "F":
+        depth = np.asarray(img, dtype=np.float64)
+        scale = 257.0 if depth.max(initial=0) > 255 else 1.0
+        img = Image.fromarray(np.clip(np.rint(depth / scale), 0, 255).astype(np.uint8))
+
+    if img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info:
+        rgba = img.convert("RGBA")
+        return rgba.convert("RGB"), rgba.getchannel("A"), info
+    return img.convert("RGB"), None, info
+
+
+def similarity_report(cover_rgb: Image.Image, stego_rgb: Image.Image) -> Dict[str, Any]:
+    """Mengukur perbedaan piksel asli dan hasil. psnr_db bernilai None jika tidak ada yang berubah."""
+    cover = np.asarray(cover_rgb, dtype=np.int16)
+    stego = np.asarray(stego_rgb, dtype=np.int16)
+    diff = np.abs(cover - stego)
+    mse = float(np.mean(diff.astype(np.float64) ** 2))
+    return {
+        "channels_changed": int(np.count_nonzero(diff)),
+        "channels_total": int(diff.size),
+        "max_channel_diff": int(diff.max(initial=0)),
+        "psnr_db": None if mse == 0 else round(10 * math.log10(255 ** 2 / mse), 2),
+    }
+
+
+def save_stego_png(stego: Image.Image) -> bytes:
+    """PNG tanpa kompresi hilang, membawa profil warna dan DPI gambar asli."""
+    options: Dict[str, Any] = {"format": "PNG"}
+    for key in ("icc_profile", "dpi"):
+        if stego.info.get(key):
+            options[key] = stego.info[key]
+    # Tidak ada satu pengaturan yang selalu paling kecil, jadi ukuran file dipilih dari hasilnya.
+    candidates = []
+    for extra in ({"compress_level": 9}, {"optimize": True}):
+        out = io.BytesIO()
+        stego.save(out, **options, **extra)
+        candidates.append(out.getvalue())
+    return min(candidates, key=len)
+
+
 def embed_message_into_image(
     image_input: Union[str, Image.Image, bytes],
     message: str,
     passphrase: str | None = None
 ) -> Image.Image:
+    """Menyisipkan pesan dan mengembalikan citra hasilnya saja."""
+    return embed_with_report(image_input, message, passphrase)[0]
+
+
+def embed_with_report(
+    image_input: Union[str, Image.Image, bytes],
+    message: str,
+    passphrase: str | None = None
+) -> Tuple[Image.Image, Dict[str, Any]]:
     """
     Menyisipkan pesan rahasia ke dalam bit LSB citra RGB 24-bit.
-    
+    Hanya kanal R, G, dan B yang berubah. Kanal alfa dan metadata tampilan dipertahankan.
+    Mengembalikan (citra hasil, laporan kemiripan).
+
     Framing Protocol:
     - Jika passphrase diisi: dienkripsi dengan Super Enkripsi -> "ENC:<salt_hex>:<ciphertext_b64>"
     - Jika passphrase kosong: plainteks langsung -> "RAW:<message>"
@@ -79,7 +156,7 @@ def embed_message_into_image(
     if not message:
         raise ValueError("Pesan rahasia tidak boleh kosong.")
 
-    img = _load_image_rgb(image_input)
+    img, alpha, display_info = _load_cover(image_input)
     w, h = img.width, img.height
     max_capacity = calculate_capacity(w, h)
 
@@ -118,7 +195,14 @@ def embed_message_into_image(
 
     # Bentuk kembali citra RGB hasil modifikasi LSB
     modified_array = flat_channels.reshape((h, w, 3))
-    return Image.fromarray(modified_array, mode="RGB")
+    stego_rgb = Image.fromarray(modified_array)
+    report = similarity_report(img, stego_rgb)
+    result = stego_rgb
+    if alpha is not None:
+        result = stego_rgb.convert("RGBA")
+        result.putalpha(alpha)
+    result.info.update(display_info)
+    return result, report
 
 
 def extract_message_from_image(
@@ -207,7 +291,8 @@ def embed_and_save_png(
         output_png_path = output_png_path + ".png"
 
     os.makedirs(os.path.dirname(os.path.abspath(output_png_path)), exist_ok=True)
-    stego_img.save(output_png_path, format="PNG")
+    with open(output_png_path, "wb") as f:
+        f.write(save_stego_png(stego_img))
     return output_png_path
 
 

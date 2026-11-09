@@ -54,7 +54,7 @@ const blankReplace = () => ({ username: "", pin: "", photo: null, cam: "idle", e
 const blankMemo = () => ({ items: null, loading: false, error: "", selId: null, detail: null, detailLoading: false, detailError: "", compose: false, saving: false, form: { title: "", category: "", content: "" }, errors: {} });
 const blankVault = () => ({ items: null, loading: false, error: "", uploading: null, uploadError: "", drag: false, downloading: null });
 const blankCourier = () => ({ file: null, pass: "", state: "idle", fileError: "", passError: "", result: null, drag: false });
-const blankStego = () => ({ cover: null, coverUrl: "", coverW: 0, coverH: 0, coverError: "", msg: "", pass: "", busy: false, embedError: "", done: false, stego: null, stegoError: "", xPass: "", xBusy: false, xResult: null, xError: "", dragA: false, dragB: false });
+const blankStego = () => ({ cover: null, coverUrl: "", coverW: 0, coverH: 0, coverError: "", msg: "", pass: "", busy: false, embedError: "", done: false, result: null, stego: null, stegoError: "", xPass: "", xBusy: false, xResult: null, xError: "", dragA: false, dragB: false });
 
 const S = {
   view: "boot",
@@ -475,7 +475,7 @@ function tabVault() {
   else if (v.error) table = statePanel({ ic: "peringatan", tone: "bad", title: "Daftar berkas gagal dimuat", body: v.error, action: button("secondary", "Muat ulang", { action: "vault-reload" }) });
   else if (!(v.items || []).length && !v.uploading) table = statePanel({ ic: "memo", title: "Belum ada berkas", body: "Unggah berkas pertama lewat kotak di atas." });
   else {
-    const rows = (v.items || []).map((f) => `<tr class="transition-colors duration-150 hover:bg-amber-50"><td class="rounded-l-2xl px-5 py-3"><span class="flex items-center gap-3 font-semibold">${icon("memo", "h-[22px] w-[22px] flex-none text-ink2")}<span class="min-w-0 break-all">${esc(f.filename)}</span></span></td><td class="mono px-3 whitespace-nowrap">${esc(fmtBytes(f.size_bytes))}</td><td class="mono px-3">RC4</td><td class="mono px-3 whitespace-nowrap text-ink2">${esc(String(f.created_at || "").slice(0, 10))}</td><td class="rounded-r-2xl px-5 py-3 text-right">${button("secondary", "Dekripsi dan unduh", { icon: "unduh", action: "vault-download", data: `data-id="${esc(f.id)}" data-name="${esc(f.filename)}"`, loading: v.downloading === f.id })}</td></tr>`).join("");
+    const rows = (v.items || []).map((f) => `<tr class="transition-colors duration-150 hover:bg-amber-50"><td class="rounded-l-2xl px-5 py-3"><span class="flex items-center gap-3 font-semibold">${icon("memo", "h-[22px] w-[22px] flex-none text-ink2")}<span class="min-w-0 break-all">${esc(f.filename)}</span></span></td><td class="mono px-3 whitespace-nowrap">${esc(fmtBytes(f.size_bytes))}</td><td class="mono px-3">RC4</td><td class="mono px-3 whitespace-nowrap text-ink2">${esc(String(f.created_at || "").slice(0, 10))}</td><td class="rounded-r-2xl px-5 py-3"><div class="flex flex-wrap justify-end gap-2">${button("ghost", "Unduh terenkripsi", { icon: "kunci", action: "vault-download-enc", data: `data-id="${esc(f.id)}" data-name="${esc(f.filename)}"`, loading: v.downloadingEnc === f.id })}${button("secondary", "Dekripsi dan unduh", { icon: "unduh", action: "vault-download", data: `data-id="${esc(f.id)}" data-name="${esc(f.filename)}"`, loading: v.downloading === f.id })}</div></td></tr>`).join("");
     const up = v.uploading ? `<tr><td class="px-5 py-3"><span class="flex items-center gap-3 font-semibold">${icon("memo", "h-[22px] w-[22px] flex-none text-ink2")}<span class="break-all">${esc(v.uploading.name)}</span></span></td><td class="mono px-3">${esc(fmtBytes(v.uploading.size))}</td><td class="mono px-3">RC4</td><td></td><td class="px-5 text-right">${badge("warn", "Mengenkripsi RC4")}</td></tr>` : "";
     table = `<table class="w-full border-separate border-spacing-y-1 text-body"><caption class="sr-only">Daftar berkas terenkripsi</caption><thead><tr class="text-left text-caption text-ink2"><th class="px-5 py-2 font-medium">Nama berkas</th><th class="px-3 font-medium">Ukuran</th><th class="px-3 font-medium">Algoritma</th><th class="px-3 font-medium">Diunggah</th><th class="px-5 text-right font-medium">Aksi</th></tr></thead><tbody>${up}${rows}</tbody></table>`;
   }
@@ -557,6 +557,30 @@ function updateCapacity() {
   }
 }
 
+function clearStegoResult() {
+  const s = S.stego;
+  if (s.result && s.result.url) URL.revokeObjectURL(s.result.url);
+  s.result = null;
+  s.done = false;
+}
+
+function stegoComparison() {
+  const s = S.stego;
+  if (!s.result) return "";
+  const r = s.result.report;
+  const pct = r ? (r.channels_changed / r.channels_total) * 100 : 0;
+  const pctText = pct > 0 && pct < 0.01 ? "kurang dari 0,01" : pct.toFixed(2).replace(".", ",");
+  const row = (k, v) => `<div class="rounded-2xl bg-canvas px-4 py-3"><dt class="text-caption text-ink2">${esc(k)}</dt><dd class="mt-1 font-mono text-[14px] font-medium leading-5">${esc(v)}</dd></div>`;
+  const figure = (src, cap) => `<figure class="min-w-0"><img src="${esc(src)}" alt="${esc(cap)}" width="${s.coverW}" height="${s.coverH}" class="h-56 w-full rounded-2xl bg-muted object-contain"><figcaption class="mt-2 text-label">${esc(cap)}</figcaption></figure>`;
+  const metrics = r ? `<dl class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      ${row("Kemiripan (PSNR)", r.psnr_db === null ? "Identik" : `${String(r.psnr_db).replace(".", ",")} dB`)}
+      ${row("Selisih warna terbesar", `${r.max_channel_diff} dari 255`)}
+      ${row("Nilai warna berubah", `${pctText}%`)}
+      ${row("Ukuran file", `${fmtBytes(s.cover.size)} ke ${fmtBytes(s.result.size)}`)}
+    </dl><p class="text-caption text-ink2">Makin tinggi PSNR, makin mirip. Pesan yang lebih pendek mengubah lebih sedikit piksel.</p>` : "";
+  return `<section class="card mt-4 space-y-4 p-6" aria-label="Perbandingan gambar"><h2 class="text-h2">Perbandingan gambar</h2><div class="grid gap-4 sm:grid-cols-2">${figure(s.coverUrl, "Gambar asli")}${figure(s.result.url, "Hasil dengan pesan")}</div>${metrics}</section>`;
+}
+
 function tabStego() {
   const s = S.stego;
   const coverBlock = s.cover
@@ -582,7 +606,7 @@ function tabStego() {
       ${s.done ? `<p class="rounded-xl bg-ok-bg p-3 text-body text-ok-text">PNG tersimpan. Kirim lewat WA sebagai dokumen, bukan foto, agar pesan tidak rusak.</p>` : ""}
       <button id="embed-btn" type="submit" class="btn btn-primary mt-auto w-full" ${over || s.busy ? "disabled" : ""}>${s.busy ? icon("proses", "spin") : icon("unduh")}Sisipkan dan ekspor PNG</button></form>
     <form class="card flex flex-col gap-3.5 p-6" data-submit="stego-extract" novalidate><h2 class="text-h2">Ambil pesan</h2>${xBlock}${field({ id: "stego-xpass", label: "Passphrase (opsional)", value: s.xPass, bind: "stego.xPass", secret: true, placeholder: "Masukkan passphrase", help: "Isi kalau pengirim mengenkripsi pesan." })}${button("secondary", "Ambil pesan", { icon: "mata", submit: true, cls: "w-full", disabled: s.xBusy })}<div class="min-h-[96px] flex-1 rounded-2xl bg-canvas px-4 py-3.5" aria-live="polite">${xResult}</div></form>
-  </div>`;
+  </div>${stegoComparison()}`;
 }
 
 /* ---------- Tab Audit ---------- */
@@ -738,7 +762,7 @@ async function submitLogin(photo) {
     S.face = { state: "pass", error: "", photo };
     render({ focusMain: true });
   } catch (err) {
-    if (err.code === "PIN_INVALID" || err.code === "USER_NOT_FOUND" || err.code === "TOO_MANY_ATTEMPTS") {
+    if (err.code === "PIN_INVALID" || err.code === "USER_NOT_FOUND") {
       applyLoginError(err);
       go("login");
       focusFirstError();
@@ -919,7 +943,7 @@ async function uploadVault(file) {
 function setCover(file) {
   const s = S.stego;
   s.coverError = "";
-  s.done = false;
+  clearStegoResult();
   s.embedError = "";
   if (!/^image\/(png|bmp|x-ms-bmp|jpeg)$/.test(file.type)) {
     s.coverError = "Pilih gambar PNG, BMP, atau JPG.";
@@ -1108,9 +1132,24 @@ const actions = {
     S.vault.downloading = null;
     render();
   },
+  "vault-download-enc": async (el) => {
+    const id = isNaN(el.dataset.id) ? el.dataset.id : Number(el.dataset.id);
+    S.vault.downloadingEnc = id;
+    render();
+    try {
+      const res = await request(`/api/attachments/${encodeURIComponent(id)}/download-encrypted`);
+      const name = filenameFrom(res, "berkas.rc4");
+      saveBlob(await res.blob(), name);
+      toast(`Salinan terenkripsi ${el.dataset.name} siap: ${name}. Isinya tidak bisa dibuka di luar AegisVault.`);
+    } catch (err) {
+      toast(err.message, "bad");
+    }
+    S.vault.downloadingEnc = null;
+    render();
+  },
   "courier-reset": () => { S.courier = blankCourier(); render({ focusMain: true }); },
   "courier-clear": () => { S.courier.file = null; S.courier.passError = ""; render(); },
-  "stego-clear-cover": () => { const s = S.stego; if (s.coverUrl) URL.revokeObjectURL(s.coverUrl); Object.assign(s, { cover: null, coverUrl: "", coverW: 0, coverH: 0, done: false, embedError: "" }); render(); },
+  "stego-clear-cover": () => { const s = S.stego; clearStegoResult(); if (s.coverUrl) URL.revokeObjectURL(s.coverUrl); Object.assign(s, { cover: null, coverUrl: "", coverW: 0, coverH: 0, embedError: "" }); render(); },
   "stego-clear-x": () => { Object.assign(S.stego, { stego: null, xResult: null, xError: "", stegoError: "" }); render(); },
   "audit-run": () => loadAudit(),
 };
@@ -1281,7 +1320,7 @@ const submits = {
   },
   "stego-embed": async () => {
     const s = S.stego;
-    s.done = false;
+    clearStegoResult();
     s.embedError = "";
     if (!s.cover) { s.embedError = "Pilih gambar sampul dulu."; render(); return; }
     if (!s.msg) { s.embedError = "Tulis pesan rahasia dulu."; render(); const t = document.getElementById("stego-msg"); if (t) t.focus(); return; }
@@ -1289,7 +1328,11 @@ const submits = {
     render();
     try {
       const res = await postForm("/api/stego/embed", { image: s.cover, message: s.msg, passphrase: s.pass });
-      saveBlob(await res.blob(), filenameFrom(res, "stego_image.png"));
+      const blob = await res.blob();
+      let report = null;
+      try { report = JSON.parse(res.headers.get("X-Stego-Report")); } catch { /* laporan tidak tersedia */ }
+      saveBlob(blob, filenameFrom(res, "stego_image.png"));
+      s.result = { url: URL.createObjectURL(blob), size: blob.size, report };
       s.done = true;
     } catch (err) {
       s.embedError = err.message;

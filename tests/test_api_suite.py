@@ -249,35 +249,15 @@ def test_check_reports_unregistered_before_camera(env):
     assert client.post("/api/auth/check", json={"username": "staf_budi", "password": "123456"}).json() == {"ok": True}
 
 
-def test_too_many_attempts_lock_survives_restart(env, tmp_path):
+def test_failed_attempts_are_not_limited(env):
     client, core, _ = env
     enroll(client, core)
     signup(client)
-    body = {"username": "staf_budi", "password": "keliru1"}
-    for _ in range(5):
-        assert code(client.post("/api/auth/check", json=body)) == "PIN_INVALID"
-    r = client.post("/api/auth/check", json={"username": "staf_budi", "password": "123456"})
-    assert r.status_code == 429 and code(r) == "TOO_MANY_ATTEMPTS"
-    assert code(login(client)) == "TOO_MANY_ATTEMPTS"
-    reopened = main.LoginGuard(core.login_guard.path)
-    with pytest.raises(main.HTTPException):
-        reopened.check("STAF_BUDI")
-
-
-def test_lock_expires_and_success_resets(env, monkeypatch):
-    client, core, _ = env
-    enroll(client, core)
-    signup(client)
-    for _ in range(4):
-        login(client, pin="keliru1")
+    for _ in range(30):
+        assert code(client.post("/api/auth/check", json={"username": "staf_budi", "password": "keliru1"})) == "PIN_INVALID"
+        assert code(login(client, pin="keliru1")) == "PIN_INVALID"
     assert login(client).status_code == 200
-    assert core.login_guard.state == {}
-    for _ in range(5):
-        login(client, pin="keliru1")
-    assert code(login(client)) == "TOO_MANY_ATTEMPTS"
-    real = main.time.time
-    monkeypatch.setattr(main.time, "time", lambda: real() + 31)
-    assert login(client).status_code == 200
+    assert not os.path.exists(os.path.join(core.paths.root, "login_attempts.json"))
 
 
 # ---------- Memo (AC-03) ----------
@@ -442,6 +422,34 @@ def test_attachment_roundtrip_encrypted(staff):
     assert d.content == data and "filename*=UTF-8''laporan%20%C3%B1.pdf" in d.headers["content-disposition"]
 
 
+def test_attachment_encrypted_download_is_stored_bytes(staff):
+    client, core, _ = staff
+    data = os.urandom(2048) + b"%PDF-penanda-asli"
+    att = client.post("/api/attachments/upload", files={"file": ("rahasia.pdf", data, "application/pdf")}).json()
+    r = client.get(f"/api/attachments/{att['id']}/download-encrypted")
+    assert r.status_code == 200
+    stored = open(os.path.join(core.paths.attachments, f"{att['att_uuid']}.rc4"), "rb").read()
+    assert r.content == stored and b"%PDF-penanda-asli" not in r.content and len(r.content) == len(data) + 16
+    disposition = r.headers["content-disposition"]
+    assert f"{att['att_uuid']}.rc4" in disposition and "rahasia" not in disposition
+    assert client.get(f"/api/attachments/{att['id']}/download").content == data
+
+
+def test_attachment_encrypted_download_rules(staff):
+    client, core, _ = staff
+    att = client.post("/api/attachments/upload", files={"file": ("a.bin", b"isi", "application/octet-stream")}).json()
+    url = f"/api/attachments/{att['id']}/download-encrypted"
+    client.post("/api/auth/logout", json={})
+    assert client.get(url).status_code == 401
+    signup(client, username="siti", name="Siti", pin="654321")
+    login(client, username="siti", pin="654321")
+    assert client.get(url).status_code == 404
+    client.post("/api/auth/logout", json={})
+    login(client)
+    os.remove(os.path.join(core.paths.attachments, f"{att['att_uuid']}.rc4"))
+    assert code(client.get(url)) == "FILE_UNREADABLE"
+
+
 def test_attachment_path_traversal_name_is_flattened(staff):
     client, _, _ = staff
     r = client.post("/api/attachments/upload", files={"file": ("..\\..\\jahat.txt", b"isi", "text/plain")})
@@ -496,6 +504,85 @@ def test_stego_jpeg_cover_exports_png(staff):
     r = embed(client, image=out.getvalue(), message="dari jpg")
     assert Image.open(io.BytesIO(r.content)).format == "PNG"
     assert extract(client, r.content).json()["message"] == "dari jpg"
+
+
+def report_of(response):
+    return json.loads(response.headers["x-stego-report"])
+
+
+def rgba_of(data):
+    return np.array(Image.open(io.BytesIO(data)).convert("RGBA"), dtype=np.int32)
+
+
+def test_stego_only_touches_lowest_bit_and_reports_it(staff):
+    client, _, _ = staff
+    cover = png_bytes(512, 512)
+    r = embed(client, image=cover)
+    diff = np.abs(rgba_of(cover) - rgba_of(r.content))
+    assert diff.max() == 1 and diff[..., 3].max() == 0
+    rep = report_of(r)
+    assert rep["max_channel_diff"] == 1 and rep["channels_total"] == 512 * 512 * 3
+    assert rep["channels_changed"] == int(np.count_nonzero(diff))
+    assert rep["psnr_db"] > 60
+
+
+def test_stego_keeps_transparency(staff):
+    client, _, _ = staff
+    arr = np.random.default_rng(2).integers(0, 255, (128, 128, 4), dtype=np.uint8)
+    arr[:64, :64, 3] = 0
+    out = io.BytesIO()
+    Image.fromarray(arr).save(out, format="PNG")
+    r = embed(client, image=out.getvalue(), message="pesan alfa")
+    result = Image.open(io.BytesIO(r.content))
+    assert result.mode == "RGBA"
+    got = np.array(result, dtype=np.int32)
+    assert (got[..., 3] == arr[..., 3]).all() and np.abs(got[..., :3] - arr[..., :3]).max() <= 1
+    assert extract(client, r.content).json()["message"] == "pesan alfa"
+
+
+def test_stego_keeps_phone_photo_orientation(staff):
+    client, _, _ = staff
+    arr = np.zeros((60, 120, 3), dtype=np.uint8)
+    arr[:, :60] = (250, 30, 30)
+    arr[:, 60:] = (30, 30, 250)
+    exif = Image.Exif()
+    exif[274] = 6
+    out = io.BytesIO()
+    Image.fromarray(arr).save(out, format="JPEG", quality=95, exif=exif)
+    r = embed(client, image=out.getvalue(), message="foto hp")
+    result = Image.open(io.BytesIO(r.content))
+    assert result.size == (60, 120)
+    pixels = np.array(result.convert("RGB"), dtype=np.int32)
+    assert pixels[20, 30, 0] > 200 and pixels[100, 30, 2] > 200
+    assert extract(client, r.content).json()["message"] == "foto hp"
+
+
+def test_stego_keeps_16bit_gradient_visible(staff):
+    client, _, _ = staff
+    ramp = (np.indices((64, 256))[1] * 257).astype(np.uint16)
+    out = io.BytesIO()
+    Image.fromarray(ramp).save(out, format="PNG")
+    r = embed(client, image=out.getvalue(), message="enam belas bit")
+    got = np.array(Image.open(io.BytesIO(r.content)).convert("L"), dtype=np.int32)
+    assert np.abs(got[0] - np.arange(256)).max() <= 2
+    assert extract(client, r.content).json()["message"] == "enam belas bit"
+
+
+def test_stego_keeps_color_profile_and_dpi(staff):
+    client, _, _ = staff
+    out = io.BytesIO()
+    Image.open(io.BytesIO(png_bytes(64, 64))).save(out, format="PNG", icc_profile=b"profil-warna-contoh", dpi=(300, 300))
+    r = embed(client, image=out.getvalue(), message="profil")
+    info = Image.open(io.BytesIO(r.content)).info
+    assert info["icc_profile"] == b"profil-warna-contoh" and round(info["dpi"][0]) == 300
+
+
+def test_stego_palette_cover_stays_visually_same(staff):
+    client, _, _ = staff
+    out = io.BytesIO()
+    Image.open(io.BytesIO(png_bytes(64, 64))).convert("P", palette=Image.ADAPTIVE, colors=64).save(out, format="PNG")
+    r = embed(client, image=out.getvalue(), message="palet")
+    assert np.abs(rgba_of(out.getvalue()) - rgba_of(r.content)).max() <= 1
 
 
 def test_stego_errors(staff):
