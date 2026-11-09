@@ -1,0 +1,17 @@
+{
+  "name": "aegisvault-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Build CSS dan font lokal untuk antarmuka AegisVault",
+  "scripts": {
+    "fonts": "node scripts/copy-fonts.js",
+    "build:css": "tailwindcss -i frontend/src/input.css -o frontend/assets/styles.css --minify",
+    "watch:css": "tailwindcss -i frontend/src/input.css -o frontend/assets/styles.css --watch",
+    "build": "npm run fonts && npm run build:css"
+  },
+  "devDependencies": {
+    "@fontsource/jetbrains-mono": "5.0.20",
+    "@fontsource/plus-jakarta-sans": "5.0.20",
+    "tailwindcss": "3.4.14"
+  }
+}
