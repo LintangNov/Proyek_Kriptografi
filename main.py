@@ -65,7 +65,7 @@ from backend.crypto_engine import (
 )
 from backend.database import Database, DatabaseIntegrityError, DuplicateRecordError
 from backend.dongle_guard import DongleError, DongleGuard, DongleMonitor, MultipleDrivesError
-from backend.stego_engine import embed_with_report, extract_message_from_image, save_stego_png
+from backend.stego_engine import SUPPORTED_FORMATS, capacity_info, embed_file, extract_message_from_image
 
 BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
@@ -236,7 +236,8 @@ class Core:
         status = self.monitor.get_status()
         with self.registry_lock:
             registered = self.registered_dongle()
-            empty = registered is None and not self.has_users()
+            has_users = self.has_users()
+            empty = registered is None and not has_users
             # Komputer baru, atau data versi lama: dongle sah pertama menjadi dongle terdaftar.
             if registered is None and status.get("valid") and (empty or self.legacy_install):
                 self.register_dongle(status["dongle_id"])
@@ -245,6 +246,8 @@ class Core:
         if status.get("valid") and status.get("dongle_id") != registered:
             status.update(valid=False, reason="USB ini bukan dongle yang terdaftar di komputer ini.")
         status["can_enroll"] = empty and registered is None
+        # Ganti dongle butuh akun staf untuk diverifikasi. Tanpa staf, pakai dongle yang terdaftar.
+        status["can_replace"] = has_users
         return status
 
     def _preserve_corrupt_ledger(self) -> None:
@@ -422,6 +425,8 @@ def create_app(storage_dir: Optional[str] = None, test_mode: Optional[bool] = No
     @app.post("/api/dongle/replace")
     def dongle_replace(body: LoginBody):
         # Untuk dongle hilang: dongle lama langsung tidak berlaku, dan sesi aktif berakhir.
+        if not core.has_users():
+            fail(409, "NO_STAFF", "Belum ada akun staf untuk diverifikasi. Tancapkan dongle yang sudah didaftarkan di komputer ini.")
         username = body.username.strip()
         core.verify_user(username, body.password)
         core.verify_user_face(username, body.face_image)
@@ -681,16 +686,39 @@ def create_app(storage_dir: Optional[str] = None, test_mode: Optional[bool] = No
             fail(422, "IMAGE_INVALID", "Berkas ini bukan gambar yang bisa dibaca. Pilih gambar lain.")
         return data
 
+    def stego_output_name(original: Optional[str], fmt: str) -> str:
+        # Nama dan ekstensi sama dengan berkas asli, supaya hasilnya tidak tampak berbeda.
+        ext = SUPPORTED_FORMATS[fmt][0]
+        stem, dot, given = os.path.basename(original or "").rpartition(".")
+        same_family = {"JPEG": ("jpg", "jpeg", "jpe", "jfif"), "TIFF": ("tif", "tiff")}.get(fmt, (ext[1:],))
+        if dot and stem and given.lower() in same_family:
+            return f"{stem}.{given}"
+        return f"{stem or os.path.basename(original or '') or 'gambar'}{ext}"
+
+    @app.post("/api/stego/capacity")
+    def stego_capacity(image: UploadFile = File(...), aegis_session: Optional[str] = Cookie(default=None)):
+        core.require_session(aegis_session)
+        data = load_image(image)
+        try:
+            return capacity_info(data)
+        except ValueError as exc:
+            fail(422, "IMAGE_UNSUPPORTED", str(exc))
+
     @app.post("/api/stego/embed")
     def stego_embed(image: UploadFile = File(...), message: str = Form(...), passphrase: str = Form(""), aegis_session: Optional[str] = Cookie(default=None)):
         core.require_session(aegis_session)
         data = load_image(image)
         try:
-            result, report = embed_with_report(data, message, passphrase or None)
+            out, report, fmt = embed_file(data, message, passphrase or None)
         except ValueError as exc:
-            fail(422, "EMBED_FAILED", str(exc))
-        headers = {**attachment_headers("stego_image.png"), "X-Stego-Report": json.dumps(report)}
-        return Response(save_stego_png(result), media_type="image/png", headers=headers)
+            text = str(exc)
+            if "kapasitas" in text:
+                fail(422, "EMBED_FAILED", "Pesan terlalu panjang untuk gambar ini. Persingkat pesan atau pakai gambar lebih besar.")
+            if "kosong" in text:
+                fail(422, "EMBED_FAILED", "Tulis pesannya dulu.")
+            fail(422, "IMAGE_UNSUPPORTED", text)
+        headers = {**attachment_headers(stego_output_name(image.filename, fmt)), "X-Stego-Report": json.dumps(report)}
+        return Response(out, media_type=SUPPORTED_FORMATS[fmt][1], headers=headers)
 
     @app.post("/api/stego/extract")
     def stego_extract(image: UploadFile = File(...), passphrase: str = Form(""), aegis_session: Optional[str] = Cookie(default=None)):
@@ -701,10 +729,10 @@ def create_app(storage_dir: Optional[str] = None, test_mode: Optional[bool] = No
         except ValueError as exc:
             text = str(exc)
             if "terenkripsi" in text:
-                fail(422, "PASSPHRASE_REQUIRED", "Pesan ini terenkripsi. Isi passphrase dari pengirim.")
+                fail(422, "PASSPHRASE_REQUIRED", "Pesan ini dikunci dengan kata sandi. Isi kata sandi dari pengirim.")
             if "mendekripsi" in text:
-                fail(422, "PASSPHRASE_INVALID", "Passphrase salah, atau pesan di dalam gambar rusak.")
-            fail(422, "NO_MESSAGE", "Gambar ini tidak memuat pesan yang bisa dibaca. Minta pengirim mengirim PNG asli sebagai dokumen, bukan foto.")
+                fail(422, "PASSPHRASE_INVALID", "Kata sandi salah, atau pesan di dalam gambar rusak.")
+            fail(422, "NO_MESSAGE", "Gambar ini tidak memuat pesan yang bisa dibaca. Minta pengirim mengirim gambar asli sebagai dokumen, bukan foto.")
 
     # ---------- Audit ----------
 
@@ -785,6 +813,41 @@ def already_running() -> bool:
     return ctypes.get_last_error() == 183  # ERROR_ALREADY_EXISTS
 
 
+_SAME_EXTENSION = ({".jpg", ".jpeg", ".jpe", ".jfif"}, {".tif", ".tiff"})
+
+
+def with_original_extension(chosen: str, suggested: str) -> str:
+    """
+    Dialog simpan Windows menyembunyikan ekstensi, jadi saat nama diketik ulang, ".jpg" atau
+    ".png" ikut terhapus dan berkasnya terbaca sebagai "File". Ekstensi asli ditambahkan lagi.
+    """
+    original = os.path.splitext(suggested)[1]
+    if not original:
+        return chosen
+    family = next((group for group in _SAME_EXTENSION if original.lower() in group), {original.lower()})
+    return chosen if os.path.splitext(chosen)[1].lower() in family else chosen + original
+
+
+def keep_download_extension() -> None:
+    """Membungkus dialog simpan pywebview agar ekstensi berkas unduhan tidak hilang."""
+    try:
+        from webview.platforms.edgechromium import EdgeChrome
+    except Exception:
+        return
+    original = EdgeChrome.on_download_starting
+    if getattr(original, "_aegis_guard", False):
+        return
+
+    def on_download_starting(self, sender, args):
+        suggested = os.path.basename(args.ResultFilePath)
+        original(self, sender, args)
+        if not args.Cancel:
+            args.ResultFilePath = with_original_extension(args.ResultFilePath, suggested)
+
+    on_download_starting._aegis_guard = True
+    EdgeChrome.on_download_starting = on_download_starting
+
+
 def main() -> None:
     import uvicorn
 
@@ -811,6 +874,7 @@ def main() -> None:
     if not wait_for_port(port):
         raise SystemExit(f"Layanan gagal berjalan pada port {port}.")
     webview.settings["ALLOW_DOWNLOADS"] = True
+    keep_download_extension()
     webview.create_window("AegisVault", f"http://{HOST}:{port}", width=1280, height=800, min_size=(1024, 700), background_color="#F5F6F8")
     webview.start()
     server.should_exit = True

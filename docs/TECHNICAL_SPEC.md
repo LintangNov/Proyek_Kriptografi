@@ -55,6 +55,7 @@ Untuk mencegah kelemahan penggunaan kunci yang sama secara berulang, sistem meng
 5. **Dongle Terdaftar per Komputer:** `dongle_id` yang diterima dicatat di `storage/dongle_registry.json` beserta HMAC berkunci. USB dengan tanda tangan sah tetap ditolak jika `dongle_id`-nya berbeda dari catatan.
    * Pendaftaran tanpa login hanya boleh saat komputer belum punya dongle dan belum punya staf.
    * Setelah itu, dongle hanya bisa diganti lewat `POST /api/dongle/replace` dengan username, PIN, dan wajah. Dongle lama langsung tidak berlaku.
+   * Selama belum ada akun staf, dongle tidak bisa diganti karena tidak ada identitas untuk diverifikasi. Pengguna wajib memakai dongle yang sudah didaftarkan.
    * Komputer baru tanpa data menerima dongle sah pertama sebagai dongle terdaftarnya.
 
 ### 3.2 Modul 2: Biometrik Adaptif & Hashing Kredensial (`backend/biometric_auth.py` & `crypto_engine.py`)
@@ -176,10 +177,27 @@ Menggunakan metode **Least Significant Bit (LSB)** pada citra RGB 24-bit (3 byte
    Untuk setiap komponen warna ke-$k$ ($\text{ChannelByte}_k \in [0, 255]$) dan bit pesan ke-$k$ ($b_k \in \{0, 1\}$):
    $$\text{ChannelByte}'_k = (\text{ChannelByte}_k \land 254) \lor b_k$$
 4. **Prosedur Ekstraksi:**
-   * Baca 32 piksel kanal warna pertama (32 bit pertama) dari gambar `.png`, susun menjadi integer 32-bit Big-Endian untuk mendapatkan nilai panjang $L$.
+   * Baca 32 piksel kanal warna pertama (32 bit pertama) dari gambar, susun menjadi integer 32-bit Big-Endian untuk mendapatkan nilai panjang $L$.
    * Validasi bahwa $0 < L \le \text{MaxPayloadBytes}$.
    * Baca tepat $L \times 8$ bit berikutnya dari LSB piksel gambar, susun kembali menjadi byte array, dan kembalikan pesan teksnya (atau dekripsi jika diawali `"ENC:"`).
-5. **Kemiripan dengan Gambar Asli:** Bit LSB hanya disisipkan pada kanal R, G, dan B. Hasil PNG mempertahankan kanal alfa, profil warna, DPI, dan arah putar foto dari EXIF. Gambar 16-bit diturunkan ke 8-bit per kanal. API melaporkan PSNR dan jumlah nilai warna yang berubah.
+5. **Kemiripan dengan Gambar Asli:** Bit LSB hanya disisipkan pada kanal R, G, dan B. Hasil mempertahankan kanal alfa, profil warna, DPI, dan EXIF (termasuk arah putar foto). Gambar 16-bit diturunkan ke 8-bit per kanal. API melaporkan PSNR dan jumlah nilai warna yang berubah. Setelah menyisipkan, aplikasi membaca ulang berkas hasil dan menolak menyimpan kalau pesannya tidak sama.
+6. **Format Hasil Sama dengan Format Asli:** Format dikenali dari isi berkas, bukan dari namanya. Nama dan ekstensi berkas hasil sama dengan berkas asli.
+
+   | Format masuk | Format hasil | Cara menyisipkan |
+   | :--- | :--- | :--- |
+   | PNG | PNG | LSB piksel |
+   | BMP | BMP | LSB piksel |
+   | TIFF | TIFF tanpa kompresi hilang (LZW kalau aslinya terkompresi JPEG) | LSB piksel |
+   | WebP | WebP lossless (`exact`, agar warna di bawah piksel transparan tetap utuh) | LSB piksel |
+   | JPEG / JPG | JPEG | LSB koefisien DCT (JSteg) |
+   | GIF, animasi, multi-halaman, format lain | ditolak (`IMAGE_UNSUPPORTED`) | |
+
+   WebP lossy menjadi WebP lossless, jadi ukurannya membesar. Ini sengaja: kompresi lossy akan menghapus bit pesan.
+7. **JPEG lewat Koefisien DCT (JSteg):** Menyimpan ulang JPEG berarti mengompres ulang dan merusak bit LSB piksel. Karena itu koefisien DCT terkuantisasi dibaca dan ditulis langsung dengan pustaka `jpeglib`, tanpa dekode dan kompres ulang. Tabel kuantisasi, subsampling warna, EXIF, dan profil warna tetap sama.
+   * Koefisien yang dipakai: semua koefisien AC (bukan DC) dengan nilai $c \notin \{0, 1\}$, urut komponen Y, Cb, Cr (dan K untuk CMYK), lalu urut blok.
+   * Substitusi pada bilangan komplemen dua: $c' = (c \land \lnot 1) \lor b$. Nilai 2 dan 3 saling bertukar, begitu pula $-2$ dan $-1$, jadi $c'$ tidak pernah menjadi 0 atau 1 dan posisi yang sama ditemukan lagi saat ekstraksi.
+   * Kapasitas: $\text{MaxPayloadBytes} = \lfloor N_{\text{koef}} / 8 \rfloor - 4$, dengan $N_{\text{koef}}$ jumlah koefisien yang memenuhi syarat. Nilainya bergantung pada isi foto, sehingga dihitung oleh `POST /api/stego/capacity`.
+   * JPEG progresif disimpan sebagai JPEG baseline dengan koefisien yang sama.
 
 ### 3.7 Modul 7: Sertifikat Keaslian Blockchain & Paket `.vault` (`backend/blockchain_ledger.py`)
 
@@ -261,6 +279,7 @@ Saat staf mengekspor memo untuk dikirim ke staf lain, aplikasi menghasilkan file
 | `POST` | `/api/attachments/upload` | Mengunggah berkas, mengenkripsinya dengan RC4 Stream Cipher, dan mencatat sertifikatnya ke Blockchain. |
 | `GET` | `/api/attachments/{id}/download` | Mendekripsi berkas `.rc4` dan mengunduhnya kembali ke format berkas asli. |
 | `GET` | `/api/attachments/{id}/download-encrypted` | Mengunduh berkas `.rc4` apa adanya tanpa dekripsi. |
-| `POST` | `/api/stego/embed` | Menerima file gambar, pesan rahasia, dan passphrase opsional, lalu mengembalikan file gambar `.png` hasil Steganografi LSB. |
-| `POST` | `/api/stego/extract` | Menerima file gambar `.png` steganografi dan mengekstrak pesan rahasia di dalamnya. |
+| `POST` | `/api/stego/capacity` | Menerima file gambar dan mengembalikan format serta kapasitas pesan dalam byte. |
+| `POST` | `/api/stego/embed` | Menerima file gambar, pesan rahasia, dan passphrase opsional, lalu mengembalikan gambar berformat sama dengan aslinya (PNG, JPEG, BMP, TIFF, atau WebP). |
+| `POST` | `/api/stego/extract` | Menerima gambar steganografi berformat PNG, JPEG, BMP, TIFF, atau WebP dan mengekstrak pesan rahasia di dalamnya. |
 | `GET` | `/api/blockchain/audit` | Mengambil seluruh rantai blok serta hasil audit validitas tiap blok dan *Database Checksum*. |

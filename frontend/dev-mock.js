@@ -27,7 +27,7 @@
     const key = `${method} ${path}`;
     if (M.fail && path.startsWith(M.fail)) { await wait(150); return fail(500, "ERROR", "Layanan lokal AegisVault tidak merespons. Muat ulang, atau buka ulang aplikasi kalau masalah berlanjut."); }
     if (key === "GET /api/system/status") {
-      return json({ dongle: { valid: M.dongle === "valid", connected: M.dongle !== "none", can_enroll: false, reason: M.dongle === "wrong" ? "USB ini bukan dongle yang terdaftar di komputer ini." : "" }, biometric: { fingerprint_available: false, active_mode: "FACE_RECOGNITION" }, db: { ok: !M.dbBad, status: M.dbBad ? "TAMPERED" : "OK", expected: M.dbBad ? "a".repeat(64) : null, actual: M.dbBad ? "b".repeat(64) : null }, session: M.session, test_mode: true });
+      return json({ dongle: { valid: M.dongle === "valid", connected: M.dongle !== "none", can_enroll: false, can_replace: Object.keys(M.users).length > 0, reason: M.dongle === "wrong" ? "USB ini bukan dongle yang terdaftar di komputer ini." : "" }, biometric: { fingerprint_available: false, active_mode: "FACE_RECOGNITION" }, db: { ok: !M.dbBad, status: M.dbBad ? "TAMPERED" : "OK", expected: M.dbBad ? "a".repeat(64) : null, actual: M.dbBad ? "b".repeat(64) : null }, session: M.session, test_mode: true });
     }
     await wait(500);
     if (key === "POST /api/dongle/enroll") return fail(403, "DONGLE_LOCKED", "Komputer ini sudah punya dongle terdaftar.");
@@ -71,8 +71,16 @@
     if (key === "POST /api/attachments/upload") { await wait(800); const f = form.get("file"); M.files.unshift({ id: M.nextId++, filename: f.name, size_bytes: f.size, created_at: "2026-11-10T08:00:00Z" }); return json({ ok: true }); }
     if (/^\/api\/attachments\/.+\/download-encrypted$/.test(path)) return blob("nonce dan ciphertext contoh", "ATT-CONTOH.rc4", "application/octet-stream");
     if (/^\/api\/attachments\/.+\/download$/.test(path)) return blob("isi contoh", "berkas-contoh.txt", "text/plain");
-    if (key === "POST /api/stego/embed") return blob("png contoh", "stego_image.png", "image/png");
-    if (key === "POST /api/stego/extract") { const n = form.get("image").name; if (n.includes("chat")) return fail(422, "NO_MESSAGE", "Gambar ini tidak memuat pesan yang bisa dibaca. Minta pengirim mengirim PNG asli sebagai dokumen, bukan foto."); return json({ message: "Rapat Anggaran Rahasia 2026!" }); }
+    if (key === "POST /api/stego/capacity") {
+      const f = form.get("image"), jpg = /\.jpe?g$/i.test(f.name), ext = (/\.([a-z]+)$/i.exec(f.name) || [, "png"])[1].toUpperCase();
+      return json({ format: jpg ? "JPEG" : ext === "TIF" ? "TIFF" : ext, capacity_bytes: jpg ? 1800 : 98300, width: 512, height: 512, method: jpg ? "dct" : "lsb" });
+    }
+    if (key === "POST /api/stego/embed") {
+      const f = form.get("image"), jpg = /\.jpe?g$/i.test(f.name);
+      const res = new Response(f, { status: 200, headers: { "Content-Disposition": `attachment; filename="${f.name}"`, "X-Stego-Report": JSON.stringify({ channels_changed: 2100, channels_total: 786432, max_channel_diff: jpg ? 7 : 1, psnr_db: jpg ? 52.4 : 72.9, method: jpg ? "dct" : "lsb", format: jpg ? "JPEG" : "PNG" }) } });
+      return res;
+    }
+    if (key === "POST /api/stego/extract") { const n = form.get("image").name; if (n.includes("chat")) return fail(422, "NO_MESSAGE", "Gambar ini tidak memuat pesan yang bisa dibaca. Minta pengirim mengirim gambar asli sebagai dokumen, bukan foto."); return json({ message: "Rapat Anggaran Rahasia 2026!" }); }
     if (key === "GET /api/blockchain/audit") {
       await wait(700);
       const chain = [genesis, { index: 1, previous_hash: genesis.block_hash, block_hash: M.docs[M.docs.length - 1].block_hash }, { index: 2, previous_hash: M.docs[M.docs.length - 1].block_hash, block_hash: "000" + "b".repeat(61) }];

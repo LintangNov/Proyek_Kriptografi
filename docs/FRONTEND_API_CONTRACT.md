@@ -21,7 +21,7 @@ Frontend butuh endpoint ini, dan semuanya sudah ada di `main.py`.
 
 | Endpoint | Permintaan | Respons |
 | :--- | :--- | :--- |
-| `GET /api/system/status` | | `dongle` (hasil `validate_dongle` ditambah `can_enroll`, dan `valid` hanya benar untuk dongle terdaftar), `biometric` (hasil `detect_fingerprint_capability`), `db` (hasil `check_integrity`), `session` (`{username, full_name}` atau `null`), `test_mode` (bool) |
+| `GET /api/system/status` | | `dongle` (hasil `validate_dongle` ditambah `can_enroll` dan `can_replace`, dan `valid` hanya benar untuk dongle terdaftar), `biometric` (hasil `detect_fingerprint_capability`), `db` (hasil `check_integrity`), `session` (`{username, full_name}` atau `null`), `test_mode` (bool) |
 | `POST /api/dongle/enroll` | `{}` | hasil `enroll_dongle` |
 | `POST /api/dongle/replace` | `{username, password, face_image}` | hasil `enroll_dongle` |
 | `POST /api/system/restore` | `{}` | `{restored: [...]}` |
@@ -39,7 +39,8 @@ Frontend butuh endpoint ini, dan semuanya sudah ada di `main.py`.
 | `POST /api/attachments/upload` | multipart `file` | `{id, ...}` |
 | `GET /api/attachments/{id}/download` | | berkas asli, nama pada `Content-Disposition` |
 | `GET /api/attachments/{id}/download-encrypted` | | isi file `.rc4` apa adanya (nonce + ciphertext), bernama `ATT-xxx.rc4` |
-| `POST /api/stego/embed` | multipart `image`, `message`, `passphrase` opsional | berkas PNG, dengan header `X-Stego-Report`: `{channels_changed, channels_total, max_channel_diff, psnr_db}` |
+| `POST /api/stego/capacity` | multipart `image` | `{format, extension, mime, capacity_bytes, width, height, method}`, `method` bernilai `lsb` atau `dct` (JPEG) |
+| `POST /api/stego/embed` | multipart `image`, `message`, `passphrase` opsional | berkas berformat sama dengan aslinya, nama sama pada `Content-Disposition`, dengan header `X-Stego-Report`: `{channels_changed, channels_total, max_channel_diff, psnr_db, method, format}`, ditambah `coefficients_changed` dan `coefficients_used` untuk JPEG |
 | `POST /api/stego/extract` | multipart `image`, `passphrase` opsional | `{message}` |
 | `GET /api/blockchain/audit` | | `{chain, chain_valid, message, db}`: `chain_valid` dan `message` dari `is_chain_valid`, `db` dari `check_integrity` |
 
@@ -52,12 +53,15 @@ Frontend butuh endpoint ini, dan semuanya sudah ada di `main.py`.
 | `USER_NOT_FOUND` | cek akun, login | "Akun belum terdaftar" pada kolom username |
 | `PIN_INVALID` | cek akun, login | "PIN salah" pada kolom PIN |
 | `DONGLE_LOCKED` | daftar dongle | Pendaftaran tanpa login ditolak, tampilkan "Ganti dongle" |
+| `NO_STAFF` | ganti dongle | Belum ada staf, kembali ke layar dongle dan minta dongle terdaftar |
 | `DB_TAMPERED` | semua data | Layar "Database berubah" dengan tombol pulihkan |
 | `FACE_MISMATCH` | login | Layar akses ditolak |
 | `NO_FACE` | login, registrasi | Minta ambil gambar ulang |
 | `FACE_NOT_ENROLLED` | login | Minta daftar ulang |
 | `USERNAME_TAKEN` | registrasi | Pesan pada kolom username |
-| `PASSPHRASE_REQUIRED` | ekstrak stego | Minta isi passphrase |
+| `PASSPHRASE_REQUIRED` | baca pesan gambar | Minta isi kata sandi pesan |
+| `PASSPHRASE_INVALID` | baca pesan gambar | Kata sandi salah atau gambar berubah |
+| `IMAGE_UNSUPPORTED` | ruang pesan, sembunyikan pesan | Format gambar ditolak (GIF, animasi, atau format lain) |
 
 Frontend memanggil `/api/auth/check` sebelum kamera menyala, jadi akun belum terdaftar atau PIN salah langsung terlihat. `/api/auth/login` tetap memeriksa keduanya lagi bersama wajah.
 

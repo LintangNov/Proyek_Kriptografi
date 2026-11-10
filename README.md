@@ -13,7 +13,7 @@ Aplikasi ini mengintegrasikan pengamanan perangkat keras (USB Hardware Dongle), 
 3. **Super Enkripsi Teks Memo (KR-03):** Enkripsi dua lapis berurutan menggabungkan algoritma klasik Extended Vigenere Cipher (256 ASCII) dan algoritma modern AES-128 Mode CBC (PKCS#7 padding, IV acak 16-byte).
 4. **Enkripsi Berkas Lampiran (KR-04):** Pengamanan berkas dokumen (`.pdf`, `.docx`, `.zip`, `.mp3`) menggunakan stream cipher RC4 (ARCFOUR) dengan nonce unik per berkas.
 5. **Enkripsi Basis Data dan Integritas (KR-05):** Field-Level Encryption pada SQLite untuk data sensitif, dilengkapi pemantauan checksum integritas berkas basis data via SHA-256.
-6. **Steganografi Citra Digital (KR-06):** Penyisipan pesan rahasia ke dalam citra PNG 24-bit menggunakan metode Least Significant Bit (LSB) dengan protokol Header 32-bit Big-Endian panjang pesan.
+6. **Steganografi Citra Digital (KR-06):** Penyisipan pesan rahasia ke dalam gambar PNG, BMP, TIFF, dan WebP dengan metode Least Significant Bit (LSB), serta ke dalam JPEG lewat koefisien DCT (JSteg), dengan protokol Header 32-bit Big-Endian panjang pesan. Format gambar hasil selalu sama dengan gambar asli.
 7. **Sertifikat Keaslian Blockchain (KR-07):** Pencetakan blok rantai lokal dengan Proof-of-Work (awalan hash `000`) dan penerbitan sertifikat digital saat mengekspor paket dokumen `.vault`.
 
 ---
@@ -110,7 +110,7 @@ $env:AEGIS_PORT="8080"; python main.py --no-window
 1. **Inisialisasi USB Dongle:**
    * Tancapkan USB Flashdisk ke komputer.
    * Jalankan aplikasi. Pada layar awal *Hardware Security Dongle Required*, pilih menu inisialisasi flashdisk untuk membuat berkas `dongle.key`.
-   * Pendaftaran tanpa login hanya tersedia saat komputer belum punya dongle dan belum punya staf. Setelah itu, komputer hanya menerima dongle tersebut. Kalau dongle hilang, gunakan menu **Ganti dongle** dengan username, PIN, dan wajah.
+   * Pendaftaran tanpa login hanya tersedia saat komputer belum punya dongle dan belum punya staf. Setelah itu, komputer hanya menerima dongle tersebut. Kalau dongle hilang, gunakan menu **Ganti dongle** dengan username, PIN, dan wajah. Menu ini baru muncul setelah ada akun staf.
 2. **Pendaftaran Akun Staf Pertama:**
    * Masukkan NIP/Username dan PIN/Kata Sandi.
    * Lakukan pengambilan sampel wajah via webcam (atau unggah foto jika `AEGIS_TEST_MODE=1`).
@@ -153,7 +153,7 @@ aegis-vault/
 ├── backend/                    # Modul inti kriptografi dan sistem
 │   ├── config.py               # Konfigurasi path dan konstanta
 │   ├── crypto_engine.py        # Super enkripsi teks, AES-128, RC4, KDF, Hash
-│   ├── stego_engine.py         # Steganografi LSB citra PNG 24-bit
+│   ├── stego_engine.py         # Steganografi LSB piksel dan DCT JPEG, format hasil sama dengan asli
 │   ├── blockchain_ledger.py    # Ledger blockchain lokal dan sertifikat digital
 │   ├── database.py             # SQLite manager dan field-level encryption
 │   ├── dongle_guard.py         # Deteksi nomor seri hardware USB dan dongle.key

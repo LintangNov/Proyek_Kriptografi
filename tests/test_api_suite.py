@@ -13,7 +13,7 @@ import sqlite3
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from PIL import Image
+from PIL import Image, ImageOps
 
 import main
 from backend import biometric_auth as biometric
@@ -206,6 +206,22 @@ def test_replace_dongle_needs_pin_and_face(staff, tmp_path, monkeypatch):
     monkeypatch.setenv("AEGIS_DONGLE_SIMULATION", str(usb))
     core.monitor.refresh()
     assert client.get("/api/system/status").json()["dongle"]["valid"] is False
+
+
+def test_no_staff_means_no_replace(env, tmp_path, monkeypatch):
+    client, core, usb = env
+    enroll(client, core)
+    assert client.get("/api/system/status").json()["dongle"]["can_replace"] is False
+    use_usb(monkeypatch, core, tmp_path / "usb_lain")
+    st = client.get("/api/system/status").json()["dongle"]
+    assert st["valid"] is False and st["can_enroll"] is False and st["can_replace"] is False
+    r = client.post("/api/dongle/replace", json={"username": "siapa", "password": "123456", "face_image": GOOD_FACE})
+    assert r.status_code == 409 and code(r) == "NO_STAFF"
+    assert not (tmp_path / "usb_lain" / "dongle.key").exists()
+    use_usb(monkeypatch, core, usb)
+    assert client.get("/api/system/status").json()["dongle"]["valid"] is True
+    signup(client)
+    assert client.get("/api/system/status").json()["dongle"]["can_replace"] is True
 
 
 def test_edited_registry_is_rejected(staff):
@@ -497,13 +513,62 @@ def test_stego_roundtrip_encrypted(staff):
     assert code(extract(client, r.content, "kunci-keliru")) == "PASSPHRASE_INVALID"
 
 
-def test_stego_jpeg_cover_exports_png(staff):
-    client, _, _ = staff
+def encode(fmt, img=None, **kw):
     out = io.BytesIO()
-    Image.open(io.BytesIO(png_bytes(128, 128))).save(out, format="JPEG")
-    r = embed(client, image=out.getvalue(), message="dari jpg")
-    assert Image.open(io.BytesIO(r.content)).format == "PNG"
-    assert extract(client, r.content).json()["message"] == "dari jpg"
+    (img or Image.open(io.BytesIO(png_bytes(256, 256)))).save(out, format=fmt, **kw)
+    return out.getvalue()
+
+
+def photo_like(w=640, h=480):
+    # Gambar bertekstur seperti foto, supaya JPEG punya cukup koefisien untuk pesan.
+    y, x = np.mgrid[0:h, 0:w]
+    base = np.stack([(x * 0.7) % 256, (y * 0.9) % 256, ((x + y) * 0.4) % 256], -1)
+    noise = np.random.default_rng(7).integers(-20, 20, (h, w, 3))
+    return Image.fromarray(np.clip(base + noise, 0, 255).astype(np.uint8))
+
+
+def test_stego_keeps_jpeg_as_jpeg(staff):
+    client, _, _ = staff
+    cover = encode("JPEG", photo_like(), quality=90)
+    r = client.post("/api/stego/embed", files={"image": ("foto rapat.jpeg", cover, "image/jpeg")}, data={"message": "dari jpg", "passphrase": "kunci"})
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+    assert "foto%20rapat.jpeg" in r.headers["content-disposition"]
+    assert Image.open(io.BytesIO(r.content)).format == "JPEG"
+    assert abs(len(r.content) - len(cover)) < len(cover) * 0.05
+    rep = report_of(r)
+    assert rep["format"] == "JPEG" and rep["method"] == "dct" and rep["psnr_db"] > 40
+    assert extract(client, r.content, "kunci").json()["message"] == "dari jpg"
+
+
+@pytest.mark.parametrize("fmt,mime,name", [("BMP", "image/bmp", "a.bmp"), ("TIFF", "image/tiff", "a.tiff"), ("WEBP", "image/webp", "a.webp"), ("PNG", "image/png", "a.png")])
+def test_stego_keeps_lossless_format(staff, fmt, mime, name):
+    client, _, _ = staff
+    cover = encode(fmt, lossless=True) if fmt == "WEBP" else encode(fmt)
+    r = client.post("/api/stego/embed", files={"image": (name, cover, mime)}, data={"message": "format sama", "passphrase": ""})
+    assert r.status_code == 200 and r.headers["content-type"] == mime
+    assert Image.open(io.BytesIO(r.content)).format == fmt and name in r.headers["content-disposition"]
+    assert np.abs(rgba_of(cover) - rgba_of(r.content)).max() <= 1
+    assert extract(client, r.content).json()["message"] == "format sama"
+
+
+def test_stego_lossy_webp_stays_webp(staff):
+    client, _, _ = staff
+    cover = encode("WEBP", quality=70)
+    r = embed(client, image=cover, message="webp")
+    assert Image.open(io.BytesIO(r.content)).format == "WEBP"
+    assert np.abs(rgba_of(cover) - rgba_of(r.content)).max() <= 1
+    assert extract(client, r.content).json()["message"] == "webp"
+
+
+def test_stego_capacity_per_format(staff):
+    client, _, _ = staff
+    png = client.post("/api/stego/capacity", files={"image": ("a.png", png_bytes(100, 80), "image/png")}).json()
+    assert png["format"] == "PNG" and png["capacity_bytes"] == 100 * 80 * 3 // 8 - 4 and png["method"] == "lsb"
+    jpg = client.post("/api/stego/capacity", files={"image": ("a.jpg", encode("JPEG", photo_like()), "image/jpeg")}).json()
+    assert jpg["format"] == "JPEG" and jpg["method"] == "dct" and jpg["capacity_bytes"] > 1000
+    gif = client.post("/api/stego/capacity", files={"image": ("a.gif", encode("GIF"), "image/gif")})
+    assert code(gif) == "IMAGE_UNSUPPORTED"
+    assert code(embed(client, image=encode("GIF"), message="x")) == "IMAGE_UNSUPPORTED"
 
 
 def report_of(response):
@@ -542,18 +607,20 @@ def test_stego_keeps_transparency(staff):
 
 def test_stego_keeps_phone_photo_orientation(staff):
     client, _, _ = staff
-    arr = np.zeros((60, 120, 3), dtype=np.uint8)
-    arr[:, :60] = (250, 30, 30)
-    arr[:, 60:] = (30, 30, 250)
+    arr = np.array(photo_like(240, 120))
+    arr[:, :120, 0], arr[:, 120:, 2] = 250, 250
     exif = Image.Exif()
     exif[274] = 6
     out = io.BytesIO()
     Image.fromarray(arr).save(out, format="JPEG", quality=95, exif=exif)
     r = embed(client, image=out.getvalue(), message="foto hp")
     result = Image.open(io.BytesIO(r.content))
-    assert result.size == (60, 120)
-    pixels = np.array(result.convert("RGB"), dtype=np.int32)
-    assert pixels[20, 30, 0] > 200 and pixels[100, 30, 2] > 200
+    # Tanda arah putar ikut tersimpan, jadi foto tampil tegak seperti aslinya.
+    assert result.getexif().get(274) == 6
+    shown = ImageOps.exif_transpose(result)
+    assert shown.size == (120, 240)
+    pixels = np.array(shown.convert("RGB"), dtype=np.int32)
+    assert pixels[60, 60, 0] > 200 and pixels[180, 60, 2] > 200
     assert extract(client, r.content).json()["message"] == "foto hp"
 
 
@@ -761,3 +828,18 @@ def test_mock_hidden_outside_test_mode(env, tmp_path, monkeypatch):
     with TestClient(app, base_url="http://127.0.0.1") as c:
         assert c.get("/dev-mock.js").status_code == 200
         assert c.get("/api/system/status").json()["test_mode"] is True
+
+
+# ---------- Nama berkas unduhan ----------
+
+@pytest.mark.parametrize("chosen,suggested,expected", [
+    ("C:/u/rahasia", "foto kegiatan.jpg", "C:/u/rahasia.jpg"),
+    ("C:/u/rahasia.JPEG", "foto.jpg", "C:/u/rahasia.JPEG"),
+    ("C:/u/rahasia.png", "foto.png", "C:/u/rahasia.png"),
+    ("C:/u/laporan.v2", "gambar.png", "C:/u/laporan.v2.png"),
+    ("C:/u/scan.tiff", "scan.tif", "C:/u/scan.tiff"),
+    ("C:/u/paket", "memo.vault", "C:/u/paket.vault"),
+    ("C:/u/catatan", "README", "C:/u/catatan"),
+])
+def test_download_keeps_original_extension(chosen, suggested, expected):
+    assert main.with_original_extension(chosen, suggested) == expected

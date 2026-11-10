@@ -54,7 +54,7 @@ const blankReplace = () => ({ username: "", pin: "", photo: null, cam: "idle", e
 const blankMemo = () => ({ items: null, loading: false, error: "", selId: null, detail: null, detailLoading: false, detailError: "", compose: false, saving: false, form: { title: "", category: "", content: "" }, errors: {} });
 const blankVault = () => ({ items: null, loading: false, error: "", uploading: null, uploadError: "", drag: false, downloading: null });
 const blankCourier = () => ({ file: null, pass: "", state: "idle", fileError: "", passError: "", result: null, drag: false });
-const blankStego = () => ({ cover: null, coverUrl: "", coverW: 0, coverH: 0, coverError: "", msg: "", pass: "", busy: false, embedError: "", done: false, result: null, stego: null, stegoError: "", xPass: "", xBusy: false, xResult: null, xError: "", dragA: false, dragB: false });
+const blankStego = () => ({ mode: "hide", cover: null, coverUrl: "", coverW: 0, coverH: 0, coverFormat: "", cap: null, capToken: 0, previewOk: true, coverError: "", msg: "", pass: "", busy: false, embedError: "", done: false, result: null, stego: null, stegoError: "", xPass: "", xBusy: false, xResult: null, xError: "", dragA: false, dragB: false });
 
 const S = {
   view: "boot",
@@ -235,8 +235,10 @@ function viewDongle() {
   let next;
   if (d.can_enroll) {
     next = `<div class="space-y-3 rounded-2xl bg-canvas p-5"><h2 class="text-body font-semibold">Pertama kali memakai AegisVault?</h2><p class="text-body text-ink2">Tancapkan flashdisk, lalu daftarkan sebagai dongle. Setelah itu, komputer ini hanya menerima dongle tersebut.</p>${button("secondary", "Daftarkan USB ini sebagai dongle", { icon: "usb", action: "enroll", loading: e.busy })}${err}</div>`;
-  } else {
+  } else if (d.can_replace) {
     next = `<div class="space-y-3 rounded-2xl bg-canvas p-5"><h2 class="text-body font-semibold">Dongle hilang atau rusak?</h2><p class="text-body text-ink2">Ganti dengan flashdisk baru memakai akun staf. Dongle lama langsung tidak berlaku.</p>${button("secondary", "Ganti dongle", { icon: "usb", action: "go-replace" })}</div>`;
+  } else {
+    next = `<div class="space-y-2 rounded-2xl bg-canvas p-5"><h2 class="text-body font-semibold">Pakai dongle yang sudah didaftarkan</h2><p class="text-body text-ink2">Komputer ini sudah punya dongle, tapi belum ada akun staf. Dongle baru hanya bisa diganti setelah ada akun staf yang bisa diverifikasi.</p></div>`;
   }
   const head = wrong
     ? `${iconTile("usb", "bg-bad-bg text-bad-text")}<div><h1 class="text-display">USB ini belum terdaftar</h1><p class="mt-2 text-reading text-ink2">${esc(d.reason || "Tancapkan dongle yang terdaftar di komputer ini.")}</p></div>`
@@ -532,29 +534,38 @@ function stegoPayloadBytes(msg, pass) {
   return 4 + 32 + 1 + Math.ceil(aes / 3) * 4; // "ENC:" + salt hex + ":" + Base64
 }
 
-const stegoCapacity = (w, h) => Math.max(Math.floor((w * h * 3) / 8) - 4, 0);
+const STEGO_ACCEPT = "image/png,image/jpeg,image/bmp,image/tiff,image/webp,.png,.jpg,.jpeg,.jfif,.bmp,.tif,.tiff,.webp";
+const STEGO_NAME = /\.(png|jpe?g|jfif|bmp|tiff?|webp)$/i;
+const STEGO_FORMATS_TEXT = "PNG, JPG, BMP, TIFF, atau WebP";
+const isStegoImage = (file) => STEGO_NAME.test(file.name) || /^image\/(png|jpeg|bmp|x-ms-bmp|tiff|webp)$/.test(file.type);
+// WebView tidak bisa menampilkan TIFF, jadi pratinjaunya diganti ikon.
+const canPreview = (file) => !/\.tiff?$/i.test(file.name) && file.type !== "image/tiff";
+const formatLabel = (fmt) => (fmt === "JPEG" ? "JPG" : fmt === "WEBP" ? "WebP" : fmt);
+const stegoOver = () => {
+  const s = S.stego;
+  return !!(s.cover && s.cap !== null && s.msg && stegoPayloadBytes(s.msg, s.pass) > s.cap);
+};
 
 function capacityMeter() {
   const s = S.stego;
-  if (!s.cover) return `<p class="text-body text-ink2">Pilih gambar sampul untuk menghitung kapasitas.</p>`;
-  const cap = stegoCapacity(s.coverW, s.coverH);
+  if (!s.cover) return `<p class="text-body text-ink2">Pilih gambar dulu. Aplikasi menghitung panjang pesan yang muat.</p>`;
+  if (s.cap === null) return `<div class="flex items-center gap-2 text-body text-ink2">${icon("proses", "h-5 w-5 spin")}Menghitung ruang pesan</div>`;
+  const cap = s.cap;
   const used = s.msg ? stegoPayloadBytes(s.msg, s.pass) : 0;
   const over = used > cap;
   const pct = cap ? Math.min(100, (used / cap) * 100) : 0;
   const near = !over && pct >= 90;
   const left = cap - used;
-  const note = over ? `Pesan kelebihan ${fmtInt(used - cap)} byte. Persingkat pesan atau pakai gambar lebih besar.` : near ? `Tersisa ${fmtInt(left)} byte. Persingkat pesan kalau masih ada tambahan.` : `Masih tersedia ${fmtInt(left)} byte.`;
-  return `<div class="flex items-center justify-between"><span class="text-label">Kapasitas LSB</span><span class="mono text-ink2">${s.coverW} x ${s.coverH} px</span></div><p class="mt-2 font-mono text-[14px] font-medium leading-5">${fmtInt(used)} dari ${fmtInt(cap)} byte${over ? "" : " terpakai"}</p><div class="mt-2 h-2.5 overflow-hidden rounded-lg bg-muted" role="progressbar" aria-label="Kapasitas terpakai" aria-valuemin="0" aria-valuemax="${cap}" aria-valuenow="${Math.min(used, cap)}"><div class="h-full rounded-lg transition-[width] duration-200 ${over ? "bg-bad-line" : near ? "bg-amber-500" : "bg-amber-400"}" style="width:${pct}%"></div></div><p class="mt-2 text-caption ${over ? "text-bad-text" : near ? "text-amber-800" : "text-ink2"}" ${over ? 'role="alert"' : ""}>${note}</p>`;
+  const bigger = s.coverFormat === "JPEG" ? "gambar lebih besar, atau versi PNG-nya" : "gambar lebih besar";
+  const note = over ? `Pesan kelebihan ${fmtInt(used - cap)} byte. Persingkat pesan atau pakai ${bigger}.` : near ? `Tersisa ${fmtInt(left)} byte. Persingkat pesan kalau masih ada tambahan.` : `Masih muat ${fmtInt(left)} byte lagi. Satu huruf biasa memakai 1 byte.`;
+  return `<div class="flex items-center justify-between gap-3"><span class="text-label">Ruang pesan</span><span class="mono text-ink2">${esc(formatLabel(s.coverFormat))}, ${s.coverW} x ${s.coverH} px</span></div><p class="mt-2 font-mono text-[14px] font-medium leading-5">${fmtInt(used)} dari ${fmtInt(cap)} byte${over ? "" : " terpakai"}</p><div class="mt-2 h-2.5 overflow-hidden rounded-lg bg-muted" role="progressbar" aria-label="Ruang pesan terpakai" aria-valuemin="0" aria-valuemax="${cap}" aria-valuenow="${Math.min(used, cap)}"><div class="h-full rounded-lg transition-[width] duration-200 ${over ? "bg-bad-line" : near ? "bg-amber-500" : "bg-amber-400"}" style="width:${pct}%"></div></div><p class="mt-2 text-caption ${over ? "text-bad-text" : near ? "text-amber-800" : "text-ink2"}" ${over ? 'role="alert"' : ""}>${note}</p>`;
 }
 
 function updateCapacity() {
   const el = document.getElementById("cap-meter");
   if (el) el.innerHTML = capacityMeter();
   const b = document.getElementById("embed-btn");
-  if (b && S.stego.cover) {
-    const over = S.stego.msg && stegoPayloadBytes(S.stego.msg, S.stego.pass) > stegoCapacity(S.stego.coverW, S.stego.coverH);
-    b.disabled = !!over || S.stego.busy;
-  }
+  if (b) b.disabled = stegoOver() || S.stego.busy || (S.stego.cover && S.stego.cap === null);
 }
 
 function clearStegoResult() {
@@ -564,49 +575,75 @@ function clearStegoResult() {
   s.done = false;
 }
 
+const noPreview = (cls) => `<div class="flex items-center justify-center rounded-2xl bg-muted text-ink2 ${cls}">${icon("gambar", "h-7 w-7")}</div>`;
+
 function stegoComparison() {
   const s = S.stego;
-  if (!s.result) return "";
   const r = s.result.report;
   const pct = r ? (r.channels_changed / r.channels_total) * 100 : 0;
   const pctText = pct > 0 && pct < 0.01 ? "kurang dari 0,01" : pct.toFixed(2).replace(".", ",");
   const row = (k, v) => `<div class="rounded-2xl bg-canvas px-4 py-3"><dt class="text-caption text-ink2">${esc(k)}</dt><dd class="mt-1 font-mono text-[14px] font-medium leading-5">${esc(v)}</dd></div>`;
-  const figure = (src, cap) => `<figure class="min-w-0"><img src="${esc(src)}" alt="${esc(cap)}" width="${s.coverW}" height="${s.coverH}" class="h-56 w-full rounded-2xl bg-muted object-contain"><figcaption class="mt-2 text-label">${esc(cap)}</figcaption></figure>`;
-  const metrics = r ? `<dl class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+  const figure = (src, cap) => `<figure class="min-w-0">${s.previewOk ? `<img src="${esc(src)}" alt="${esc(cap)}" width="${s.coverW}" height="${s.coverH}" class="h-48 w-full rounded-2xl bg-muted object-contain">` : noPreview("h-48 w-full")}<figcaption class="mt-2 text-label">${esc(cap)}</figcaption></figure>`;
+  const jpeg = r && r.method === "dct";
+  const metrics = r ? `<dl class="grid gap-3 sm:grid-cols-2">
       ${row("Kemiripan (PSNR)", r.psnr_db === null ? "Identik" : `${String(r.psnr_db).replace(".", ",")} dB`)}
       ${row("Selisih warna terbesar", `${r.max_channel_diff} dari 255`)}
       ${row("Nilai warna berubah", `${pctText}%`)}
       ${row("Ukuran file", `${fmtBytes(s.cover.size)} ke ${fmtBytes(s.result.size)}`)}
-    </dl><p class="text-caption text-ink2">Makin tinggi PSNR, makin mirip. Pesan yang lebih pendek mengubah lebih sedikit piksel.</p>` : "";
-  return `<section class="card mt-4 space-y-4 p-6" aria-label="Perbandingan gambar"><h2 class="text-h2">Perbandingan gambar</h2><div class="grid gap-4 sm:grid-cols-2">${figure(s.coverUrl, "Gambar asli")}${figure(s.result.url, "Hasil dengan pesan")}</div>${metrics}</section>`;
+    </dl><p class="text-caption text-ink2">${jpeg ? "Pada JPG, pesan disimpan di data kompresinya, jadi gambar tidak dikompres ulang. " : ""}Makin tinggi PSNR, makin mirip. Di atas 40 dB, perbedaannya tidak terlihat mata. Pesan yang lebih pendek mengubah lebih sedikit bagian gambar.</p>` : "";
+  const fmt = formatLabel((r && r.format) || s.coverFormat);
+  return `<section class="card space-y-4 p-6" aria-label="Perbandingan gambar"><div class="flex flex-wrap items-center justify-between gap-2"><h2 class="text-h2">Perbandingan gambar</h2>${fmt ? badge("ok", `Format tetap ${fmt}`) : ""}</div><div class="grid gap-4 sm:grid-cols-2">${figure(s.coverUrl, "Gambar asli")}${figure(s.result.url, "Hasil dengan pesan")}</div>${metrics}</section>`;
+}
+
+function stegoTabs() {
+  const s = S.stego;
+  const tab = (id, label, ic) => `<button type="button" role="tab" id="stego-tab-${id}" aria-controls="stego-panel" aria-selected="${s.mode === id}" class="flex min-h-[44px] items-center gap-2 rounded-xl px-4 text-body font-semibold transition-colors duration-150 ${s.mode === id ? "bg-white text-amber-800 shadow-sm" : "text-ink2 hover:text-ink"}" data-action="stego-mode" data-mode="${id}">${icon(ic, "h-5 w-5")}${esc(label)}</button>`;
+  return `<div role="tablist" aria-label="Pilih kegiatan" class="mb-4 inline-flex flex-wrap gap-1 rounded-2xl bg-muted p-1">${tab("hide", "Sembunyikan pesan", "kunci")}${tab("read", "Baca pesan", "mata")}</div>`;
+}
+
+function stegoHidePanel() {
+  const s = S.stego;
+  const thumb = s.previewOk ? `<img src="${esc(s.coverUrl)}" alt="Pratinjau gambar" width="56" height="56" class="h-14 w-14 flex-none rounded-xl object-cover">` : noPreview("h-14 w-14 flex-none bg-white");
+  const coverBlock = s.cover
+    ? `<div class="flex items-center gap-3 rounded-2xl bg-muted p-3">${thumb}<span class="mono flex-1 break-all text-[13px]">${esc(s.cover.name)}</span><button type="button" class="flex h-11 w-11 flex-none items-center justify-center rounded-xl text-ink2 hover:bg-white" data-action="stego-clear-cover" aria-label="Hapus gambar">${icon("tutup", "h-5 w-5")}</button></div>`
+    : dropzone({ id: "cover-file", zone: "cover", onFile: "cover-file", title: "Seret gambar ke sini, atau pilih dari komputer", body: `${STEGO_FORMATS_TEXT}. Hasilnya tetap berformat sama dengan gambar asli.`, label: "Pilih gambar", accept: STEGO_ACCEPT, drag: s.dragA, error: s.coverError ? { title: "Gambar tidak bisa dipakai", body: s.coverError } : null });
+  const blocked = stegoOver() || s.busy || (s.cover && s.cap === null);
+  const side = s.result
+    ? stegoComparison()
+    : `<section class="card flex items-center justify-center p-6">${statePanel({ ic: "gambar", title: "Belum ada hasil", body: "Setelah pesan disembunyikan, gambar asli dan hasilnya tampil berdampingan di sini." })}</section>`;
+  return `<div class="grid gap-4 xl:grid-cols-2">
+    <form class="card flex flex-col gap-3.5 p-6" data-submit="stego-embed" novalidate><div><h2 class="text-h2">Sembunyikan pesan di gambar</h2><p class="mt-1 text-body text-ink2">Gambar tetap terlihat sama. Pesannya hanya bisa dibaca lewat AegisVault.</p></div>${coverBlock}<div id="cap-meter" class="py-1">${capacityMeter()}</div>
+      <div><label class="field-label" for="stego-msg">Pesan</label><textarea id="stego-msg" class="field-input" rows="4" data-bind="stego.msg" placeholder="Tulis pesan yang ingin disembunyikan">${esc(s.msg)}</textarea></div>
+      ${field({ id: "stego-pass", label: "Kata sandi pesan (opsional)", value: s.pass, bind: "stego.pass", secret: true, placeholder: "Buat kata sandi", help: "Kalau diisi, penerima perlu kata sandi yang sama untuk membaca pesan. Sampaikan lewat jalur lain." })}
+      ${s.embedError ? `<p class="field-error" role="alert">${esc(s.embedError)}</p>` : ""}
+      ${s.done ? `<p class="rounded-xl bg-ok-bg p-3 text-body text-ok-text">Gambar tersimpan sebagai ${esc(s.result.name)}. Kirim lewat WA sebagai dokumen, bukan foto, agar pesan tidak hilang.</p>` : ""}
+      <button id="embed-btn" type="submit" class="btn btn-primary mt-auto w-full" ${blocked ? "disabled" : ""}>${s.busy ? icon("proses", "spin") : icon("unduh")}Sembunyikan pesan dan simpan gambar</button></form>
+    ${side}
+  </div>`;
+}
+
+function stegoReadPanel() {
+  const s = S.stego;
+  const xBlock = s.stego
+    ? `<div class="flex items-center gap-3 rounded-2xl bg-muted px-4 py-3.5">${icon("gambar", "h-[22px] w-[22px] flex-none text-ink2")}<span class="mono flex-1 break-all text-[13px]">${esc(s.stego.name)}</span><button type="button" class="flex h-11 w-11 flex-none items-center justify-center rounded-xl text-ink2 hover:bg-white" data-action="stego-clear-x" aria-label="Hapus gambar">${icon("tutup", "h-5 w-5")}</button></div>`
+    : dropzone({ id: "stego-file", zone: "stego", onFile: "stego-file", title: "Seret gambar yang Anda terima, atau pilih dari komputer", body: `${STEGO_FORMATS_TEXT}. Pakai berkas aslinya. Gambar yang dikirim sebagai foto di WA sudah dikompres, jadi pesannya hilang.`, label: "Pilih gambar", accept: STEGO_ACCEPT, drag: s.dragB, error: s.stegoError ? { title: "Gambar tidak bisa dipakai", body: s.stegoError } : null });
+  const xResult = s.xBusy
+    ? `<div class="flex items-center gap-2 text-body text-amber-800">${icon("proses", "h-5 w-5 spin")}Membaca pesan dari gambar</div>`
+    : s.xResult !== null
+      ? `${badge("ok", "Pesan ditemukan")}<p class="mt-2.5 whitespace-pre-wrap break-words text-reading">${esc(s.xResult)}</p>`
+      : s.xError
+        ? `${badge("bad", "Pesan belum terbaca")}<p class="mt-2.5 text-reading" role="alert">${esc(s.xError)}</p>`
+        : `<p class="text-body text-ink2">Isi pesan muncul di sini.</p>`;
+  return `<div class="grid gap-4 xl:grid-cols-2">
+    <form class="card flex flex-col gap-3.5 p-6" data-submit="stego-extract" novalidate><div><h2 class="text-h2">Baca pesan dari gambar</h2><p class="mt-1 text-body text-ink2">Pilih gambar yang berisi pesan dari staf lain.</p></div>${xBlock}${field({ id: "stego-xpass", label: "Kata sandi pesan (opsional)", value: s.xPass, bind: "stego.xPass", secret: true, placeholder: "Masukkan kata sandi", help: "Isi kalau pengirim memberi kata sandi." })}${button("primary", "Baca pesan", { icon: "mata", submit: true, cls: "mt-auto w-full", disabled: s.xBusy })}</form>
+    <section class="card flex flex-col p-6" aria-live="polite"><h2 class="text-h2">Isi pesan</h2><div class="mt-3.5 min-h-[120px] flex-1 rounded-2xl bg-canvas px-4 py-3.5">${xResult}</div></section>
+  </div>`;
 }
 
 function tabStego() {
   const s = S.stego;
-  const coverBlock = s.cover
-    ? `<div class="flex items-center gap-3 rounded-2xl bg-muted p-3"><img src="${esc(s.coverUrl)}" alt="Pratinjau gambar sampul" width="56" height="56" class="h-14 w-14 flex-none rounded-xl object-cover"><span class="mono flex-1 break-all text-[13px]">${esc(s.cover.name)}</span><button type="button" class="flex h-11 w-11 flex-none items-center justify-center rounded-xl text-ink2 hover:bg-white" data-action="stego-clear-cover" aria-label="Hapus gambar sampul">${icon("tutup", "h-5 w-5")}</button></div>`
-    : dropzone({ id: "cover-file", zone: "cover", onFile: "cover-file", title: "Seret gambar sampul, atau pilih dari komputer", body: "PNG atau BMP. JPG diubah ke PNG, karena kompresi JPG merusak pesan.", label: "Pilih gambar", accept: "image/png,image/bmp,image/jpeg", drag: s.dragA, error: s.coverError ? { title: "Gambar tidak bisa dibuka", body: s.coverError } : null });
-  const xBlock = s.stego
-    ? `<div class="flex items-center gap-3 rounded-2xl bg-muted px-4 py-3.5">${icon("gambar", "h-[22px] w-[22px] flex-none text-ink2")}<span class="mono flex-1 break-all text-[13px]">${esc(s.stego.name)}</span><button type="button" class="flex h-11 w-11 flex-none items-center justify-center rounded-xl text-ink2 hover:bg-white" data-action="stego-clear-x" aria-label="Hapus gambar">${icon("tutup", "h-5 w-5")}</button></div>`
-    : dropzone({ id: "stego-file", zone: "stego", onFile: "stego-file", title: "Seret gambar PNG, atau pilih dari komputer", body: "Pakai PNG asli. Kompresi dari aplikasi chat bisa merusak pesan.", label: "Pilih gambar", accept: "image/png", drag: s.dragB, error: s.stegoError ? { title: "Gambar tidak bisa dibuka", body: s.stegoError } : null });
-  const xResult = s.xBusy
-    ? `<div class="flex items-center gap-2 text-body text-amber-800">${icon("proses", "h-5 w-5 spin")}Membaca bit LSB gambar</div>`
-    : s.xResult !== null
-      ? `${badge("ok", "Pesan ditemukan")}<p class="mt-2.5 whitespace-pre-wrap text-reading">${esc(s.xResult)}</p>`
-      : s.xError
-        ? `${badge("bad", "Pesan tidak ditemukan")}<p class="mt-2.5 text-reading" role="alert">${esc(s.xError)}</p>`
-        : `<p class="text-body text-ink2">Pesan yang berhasil diambil muncul di sini.</p>`;
-  const over = s.cover && s.msg && stegoPayloadBytes(s.msg, s.pass) > stegoCapacity(s.coverW, s.coverH);
-  return `<header class="mb-4"><h1 class="text-h1">Studio steganografi</h1><p class="mt-1 text-body text-ink2">Sisipkan pesan ke gambar PNG, atau ambil pesan dari gambar yang Anda terima.</p></header>
-  <div class="grid gap-4 xl:grid-cols-2">
-    <form class="card flex flex-col gap-3.5 p-6" data-submit="stego-embed" novalidate><h2 class="text-h2">Sisipkan pesan</h2>${coverBlock}<div id="cap-meter" class="py-1">${capacityMeter()}</div>
-      <div><label class="field-label" for="stego-msg">Pesan rahasia</label><textarea id="stego-msg" class="field-input" rows="3" data-bind="stego.msg" placeholder="Tulis pesan rahasia">${esc(s.msg)}</textarea></div>
-      ${field({ id: "stego-pass", label: "Passphrase (opsional)", value: s.pass, bind: "stego.pass", secret: true, placeholder: "Masukkan passphrase", help: "Aplikasi mengenkripsi pesan kalau kolom ini terisi." })}
-      ${s.embedError ? `<p class="field-error" role="alert">${esc(s.embedError)}</p>` : ""}
-      ${s.done ? `<p class="rounded-xl bg-ok-bg p-3 text-body text-ok-text">PNG tersimpan. Kirim lewat WA sebagai dokumen, bukan foto, agar pesan tidak rusak.</p>` : ""}
-      <button id="embed-btn" type="submit" class="btn btn-primary mt-auto w-full" ${over || s.busy ? "disabled" : ""}>${s.busy ? icon("proses", "spin") : icon("unduh")}Sisipkan dan ekspor PNG</button></form>
-    <form class="card flex flex-col gap-3.5 p-6" data-submit="stego-extract" novalidate><h2 class="text-h2">Ambil pesan</h2>${xBlock}${field({ id: "stego-xpass", label: "Passphrase (opsional)", value: s.xPass, bind: "stego.xPass", secret: true, placeholder: "Masukkan passphrase", help: "Isi kalau pengirim mengenkripsi pesan." })}${button("secondary", "Ambil pesan", { icon: "mata", submit: true, cls: "w-full", disabled: s.xBusy })}<div class="min-h-[96px] flex-1 rounded-2xl bg-canvas px-4 py-3.5" aria-live="polite">${xResult}</div></form>
-  </div>${stegoComparison()}`;
+  return `<header class="mb-4"><h1 class="text-h1">Studio steganografi</h1><p class="mt-1 text-body text-ink2">Sembunyikan pesan di dalam gambar, atau baca pesan dari gambar yang Anda terima.</p></header>
+  ${stegoTabs()}<div id="stego-panel" role="tabpanel" aria-labelledby="stego-tab-${s.mode}">${s.mode === "read" ? stegoReadPanel() : stegoHidePanel()}</div>`;
 }
 
 /* ---------- Tab Audit ---------- */
@@ -940,32 +977,32 @@ async function uploadVault(file) {
   }
 }
 
-function setCover(file) {
+async function setCover(file) {
   const s = S.stego;
   s.coverError = "";
   clearStegoResult();
   s.embedError = "";
-  if (!/^image\/(png|bmp|x-ms-bmp|jpeg)$/.test(file.type)) {
-    s.coverError = "Pilih gambar PNG, BMP, atau JPG.";
+  if (!isStegoImage(file)) {
+    s.coverError = `Pilih gambar ${STEGO_FORMATS_TEXT}.`;
     render();
     return;
   }
-  const url = URL.createObjectURL(file);
-  const img = new Image();
-  img.onload = () => {
-    if (s.coverUrl) URL.revokeObjectURL(s.coverUrl);
-    s.cover = file;
-    s.coverUrl = url;
-    s.coverW = img.naturalWidth;
-    s.coverH = img.naturalHeight;
+  if (s.coverUrl) URL.revokeObjectURL(s.coverUrl);
+  const token = s.capToken + 1;
+  Object.assign(s, { cover: file, coverUrl: URL.createObjectURL(file), coverW: 0, coverH: 0, coverFormat: "", cap: null, capToken: token, previewOk: canPreview(file) });
+  render();
+  try {
+    // Ruang pesan dihitung backend, karena JPG memakai cara simpan yang berbeda dari PNG.
+    const info = await (await postForm("/api/stego/capacity", { image: file })).json();
+    if (s.capToken !== token) return;
+    Object.assign(s, { cap: info.capacity_bytes, coverW: info.width, coverH: info.height, coverFormat: info.format });
+    updateCapacity();
+  } catch (err) {
+    if (s.capToken !== token) return;
+    URL.revokeObjectURL(s.coverUrl);
+    Object.assign(s, { cover: null, coverUrl: "", cap: null, coverError: err.message });
     render();
-  };
-  img.onerror = () => {
-    URL.revokeObjectURL(url);
-    s.coverError = "Berkas gambar rusak. Pilih gambar lain.";
-    render();
-  };
-  img.src = url;
+  }
 }
 
 function setCourierFile(file) {
@@ -986,8 +1023,8 @@ function setStegoFile(file) {
   s.stegoError = "";
   s.xResult = null;
   s.xError = "";
-  if (file.type !== "image/png") {
-    s.stegoError = "Pilih gambar PNG. Format lain tidak menyimpan pesan LSB secara utuh.";
+  if (!isStegoImage(file)) {
+    s.stegoError = `Pilih gambar ${STEGO_FORMATS_TEXT}.`;
     s.stego = null;
   } else {
     s.stego = file;
@@ -1149,7 +1186,8 @@ const actions = {
   },
   "courier-reset": () => { S.courier = blankCourier(); render({ focusMain: true }); },
   "courier-clear": () => { S.courier.file = null; S.courier.passError = ""; render(); },
-  "stego-clear-cover": () => { const s = S.stego; clearStegoResult(); if (s.coverUrl) URL.revokeObjectURL(s.coverUrl); Object.assign(s, { cover: null, coverUrl: "", coverW: 0, coverH: 0, embedError: "" }); render(); },
+  "stego-clear-cover": () => { const s = S.stego; clearStegoResult(); if (s.coverUrl) URL.revokeObjectURL(s.coverUrl); Object.assign(s, { cover: null, coverUrl: "", coverW: 0, coverH: 0, coverFormat: "", cap: null, capToken: s.capToken + 1, embedError: "" }); render(); },
+  "stego-mode": (el) => { S.stego.mode = el.dataset.mode; render(); },
   "stego-clear-x": () => { Object.assign(S.stego, { stego: null, xResult: null, xError: "", stegoError: "" }); render(); },
   "audit-run": () => loadAudit(),
 };
@@ -1218,6 +1256,7 @@ const submits = {
       r.pin = "";
       if (err.code === "USER_NOT_FOUND") r.errors.username = "Akun belum terdaftar. Periksa username.";
       else if (err.code === "PIN_INVALID") r.errors.pin = "PIN salah. Periksa Caps Lock, lalu coba lagi.";
+      else if (err.code === "NO_STAFF") { S.replace = blankReplace(); toast(err.message, "bad"); go("dongle"); return; }
       else if (err.code === "FACE_MISMATCH") { r.photo = null; r.errors.photo = "Wajah tidak cocok. Ambil ulang foto."; openReplace(); return; }
       else if (err.code === "NO_FACE") { r.photo = null; r.errors.photo = "Aplikasi tidak menemukan wajah. Ambil ulang foto."; openReplace(); return; }
       else r.formError = err.message;
@@ -1322,8 +1361,8 @@ const submits = {
     const s = S.stego;
     clearStegoResult();
     s.embedError = "";
-    if (!s.cover) { s.embedError = "Pilih gambar sampul dulu."; render(); return; }
-    if (!s.msg) { s.embedError = "Tulis pesan rahasia dulu."; render(); const t = document.getElementById("stego-msg"); if (t) t.focus(); return; }
+    if (!s.cover) { s.embedError = "Pilih gambar dulu."; render(); return; }
+    if (!s.msg) { s.embedError = "Tulis pesannya dulu."; render(); const t = document.getElementById("stego-msg"); if (t) t.focus(); return; }
     s.busy = true;
     render();
     try {
@@ -1331,8 +1370,9 @@ const submits = {
       const blob = await res.blob();
       let report = null;
       try { report = JSON.parse(res.headers.get("X-Stego-Report")); } catch { /* laporan tidak tersedia */ }
-      saveBlob(blob, filenameFrom(res, "stego_image.png"));
-      s.result = { url: URL.createObjectURL(blob), size: blob.size, report };
+      const name = filenameFrom(res, s.cover.name);
+      saveBlob(blob, name);
+      s.result = { url: URL.createObjectURL(blob), size: blob.size, report, name };
       s.done = true;
     } catch (err) {
       s.embedError = err.message;
@@ -1344,14 +1384,14 @@ const submits = {
     const s = S.stego;
     s.xResult = null;
     s.xError = "";
-    if (!s.stego) { s.stegoError = "Pilih gambar PNG dulu."; render(); return; }
+    if (!s.stego) { s.stegoError = "Pilih gambar dulu."; render(); return; }
     s.xBusy = true;
     render();
     try {
       const res = await (await postForm("/api/stego/extract", { image: s.stego, passphrase: s.xPass })).json();
       s.xResult = res.message;
     } catch (err) {
-      s.xError = err.code === "PASSPHRASE_REQUIRED" ? "Pesan ini terenkripsi. Isi passphrase dari pengirim, lalu coba lagi." : err.message;
+      s.xError = { PASSPHRASE_REQUIRED: "Pesan ini dikunci dengan kata sandi. Isi kata sandi dari pengirim, lalu coba lagi.", PASSPHRASE_INVALID: "Kata sandi salah, atau gambarnya sudah berubah. Tanyakan lagi ke pengirim." }[err.code] || err.message;
     }
     s.xBusy = false;
     render();

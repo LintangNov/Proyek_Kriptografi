@@ -8,4 +8,5 @@ Pillow>=10.3.0
 psutil>=5.9.8
 python-multipart>=0.0.9
 pydantic>=2.7.0
+jpeglib>=1.0.2
 
