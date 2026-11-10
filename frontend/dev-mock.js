@@ -58,18 +58,20 @@
     if (m && method === "DELETE") { M.docs = M.docs.filter((x) => String(x.id) !== m[1]); return json({ ok: true }); }
     m = /^\/api\/documents\/([^/]+)\/ciphertext$/.exec(path);
     if (m) return json({ plaintext: "Rapat Anggaran Rahasia 2026!", vigenere_ciphertext_hex: "a52f64139977ba14289e89b832cdfdb1b43655258eb899d8f1695e67", aes_iv_hex: "0f1e2d3c4b5a69788796a5b4c3d2e1f0", final_ciphertext_b64: "Dx4tPEtaaXiHlqW0w9Lh8LbZDw5agoFSmcIjdw19C/jU49VASveqsp0n0x7lmdkc" });
-    if (/\/export$/.test(path)) return blob("{}", "memo-contoh.vault", "application/json");
+    if (/^\/api\/documents\/[^/]+\/export$/.test(path)) return blob("{}", "memo-contoh.vault", "application/json");
     if (key === "POST /api/documents/import-verify") {
       await wait(1000);
       const name = form.get("file").name, pass = form.get("passphrase");
       if (pass === "salah") return json({ valid: false, status: "INVALID_PASSPHRASE_OR_TAMPERED" });
       if (name.includes("rusak")) return json({ valid: false, status: "INVALID_FORMAT" });
+      if (name.includes("berkas")) return json({ valid: true, status: "VALID", package_type: "file", metadata: { doc_uuid: "ATT-CONTOH", author: "staf_budi", filename: "anggaran-kuartal-iv.pdf", mime_type: "application/pdf", size_bytes: 18, created_at: "2026-11-08T10:00:00Z" }, certificate: { ...cert, doc_uuid: "ATT-CONTOH" }, decrypted_content: null, file_b64: btoa("isi berkas contoh") });
       if (name.includes("manipulasi")) return json({ valid: false, status: "TAMPERED_CONTENT", metadata: meta, certificate: cert, decrypted_content: "Isi yang sudah berubah" });
       return json({ valid: true, status: "VALID", metadata: meta, certificate: cert, decrypted_content: "Rapat Anggaran Rahasia 2026!" });
     }
     if (key === "GET /api/attachments") return json(M.files);
     if (key === "POST /api/attachments/upload") { await wait(800); const f = form.get("file"); M.files.unshift({ id: M.nextId++, filename: f.name, size_bytes: f.size, created_at: "2026-11-10T08:00:00Z" }); return json({ ok: true }); }
-    if (/^\/api\/attachments\/.+\/download-encrypted$/.test(path)) return blob("nonce dan ciphertext contoh", "ATT-CONTOH.rc4", "application/octet-stream");
+    m = /^\/api\/attachments\/([^/]+)\/export$/.exec(path);
+    if (m) { await wait(600); const f = M.files.find((x) => String(x.id) === m[1]); return blob('{"package_type":"file"}', `${f ? f.filename : "berkas"}.vault`, "application/json"); }
     if (/^\/api\/attachments\/.+\/download$/.test(path)) return blob("isi contoh", "berkas-contoh.txt", "text/plain");
     if (key === "POST /api/stego/capacity") {
       const f = form.get("image"), jpg = /\.jpe?g$/i.test(f.name), ext = (/\.([a-z]+)$/i.exec(f.name) || [, "png"])[1].toUpperCase();

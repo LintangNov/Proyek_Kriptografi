@@ -441,8 +441,12 @@ function dialogView() {
   let title = "";
   let body = "";
   if (d.type === "export") {
-    title = "Ekspor paket .vault";
-    body = `<form class="space-y-5" data-submit="export" novalidate><p class="text-body text-ink2">Penerima butuh passphrase ini untuk membuka paket. Kirim berkas lewat WA atau email, lalu sampaikan passphrase lewat telepon atau tatap muka.</p>${field({ id: "export-pass", label: "Passphrase bersama", value: d.pass, bind: "dialog.pass", secret: true, placeholder: "Buat passphrase bersama", help: "Minimal 8 karakter. Makin panjang makin sulit ditebak.", error: d.error, autocomplete: "new-password" })}<div class="flex justify-end gap-3">${button("secondary", "Batal", { action: "close-dialog" })}${button("primary", "Ekspor paket", { icon: "unduh", submit: true, loading: d.busy })}</div></form>`;
+    const file = d.target === "file";
+    title = file ? "Kirim ke staf lain" : "Ekspor paket .vault";
+    const intro = file
+      ? `Aplikasi membungkus <span class="font-semibold text-ink">${esc(d.name)}</span> menjadi paket .vault yang terkunci passphrase bersama. Kirim paketnya lewat WA sebagai dokumen, lalu sampaikan passphrase lewat telepon atau tatap muka. Penerima membukanya di tab Kurir dan verifikasi.`
+      : "Penerima butuh passphrase ini untuk membuka paket. Kirim berkas lewat WA atau email, lalu sampaikan passphrase lewat telepon atau tatap muka.";
+    body = `<form class="space-y-5" data-submit="export" novalidate><p class="text-body text-ink2">${intro}</p>${field({ id: "export-pass", label: "Passphrase bersama", value: d.pass, bind: "dialog.pass", secret: true, placeholder: "Buat passphrase bersama", help: "Minimal 8 karakter. Makin panjang makin sulit ditebak.", error: d.error, autocomplete: "new-password" })}<div class="flex justify-end gap-3">${button("secondary", "Batal", { action: "close-dialog" })}${button("primary", file ? "Buat paket" : "Ekspor paket", { icon: "unduh", submit: true, loading: d.busy })}</div></form>`;
   } else if (d.type === "cipher") {
     title = "Lihat ciphertext";
     const row = (k, v) => `<div class="rounded-2xl bg-canvas px-4 py-3"><h3 class="mb-1.5 text-label text-ink2">${esc(k)}</h3><p class="mono text-[13px] leading-5">${esc(v)}</p></div>`;
@@ -477,7 +481,7 @@ function tabVault() {
   else if (v.error) table = statePanel({ ic: "peringatan", tone: "bad", title: "Daftar berkas gagal dimuat", body: v.error, action: button("secondary", "Muat ulang", { action: "vault-reload" }) });
   else if (!(v.items || []).length && !v.uploading) table = statePanel({ ic: "memo", title: "Belum ada berkas", body: "Unggah berkas pertama lewat kotak di atas." });
   else {
-    const rows = (v.items || []).map((f) => `<tr class="transition-colors duration-150 hover:bg-amber-50"><td class="rounded-l-2xl px-5 py-3"><span class="flex items-center gap-3 font-semibold">${icon("memo", "h-[22px] w-[22px] flex-none text-ink2")}<span class="min-w-0 break-all">${esc(f.filename)}</span></span></td><td class="mono px-3 whitespace-nowrap">${esc(fmtBytes(f.size_bytes))}</td><td class="mono px-3">RC4</td><td class="mono px-3 whitespace-nowrap text-ink2">${esc(String(f.created_at || "").slice(0, 10))}</td><td class="rounded-r-2xl px-5 py-3"><div class="flex flex-wrap justify-end gap-2">${button("ghost", "Unduh terenkripsi", { icon: "kunci", action: "vault-download-enc", data: `data-id="${esc(f.id)}" data-name="${esc(f.filename)}"`, loading: v.downloadingEnc === f.id })}${button("secondary", "Dekripsi dan unduh", { icon: "unduh", action: "vault-download", data: `data-id="${esc(f.id)}" data-name="${esc(f.filename)}"`, loading: v.downloading === f.id })}</div></td></tr>`).join("");
+    const rows = (v.items || []).map((f) => `<tr class="transition-colors duration-150 hover:bg-amber-50"><td class="rounded-l-2xl px-5 py-3"><span class="flex items-center gap-3 font-semibold">${icon("memo", "h-[22px] w-[22px] flex-none text-ink2")}<span class="min-w-0 break-all">${esc(f.filename)}</span></span></td><td class="mono px-3 whitespace-nowrap">${esc(fmtBytes(f.size_bytes))}</td><td class="mono px-3">RC4</td><td class="mono px-3 whitespace-nowrap text-ink2">${esc(String(f.created_at || "").slice(0, 10))}</td><td class="rounded-r-2xl px-5 py-3"><div class="flex flex-wrap justify-end gap-2">${button("ghost", "Kirim ke staf lain", { icon: "kurir", action: "vault-send", data: `data-id="${esc(f.id)}" data-name="${esc(f.filename)}"` })}${button("secondary", "Dekripsi dan unduh", { icon: "unduh", action: "vault-download", data: `data-id="${esc(f.id)}" data-name="${esc(f.filename)}"`, loading: v.downloading === f.id })}</div></td></tr>`).join("");
     const up = v.uploading ? `<tr><td class="px-5 py-3"><span class="flex items-center gap-3 font-semibold">${icon("memo", "h-[22px] w-[22px] flex-none text-ink2")}<span class="break-all">${esc(v.uploading.name)}</span></span></td><td class="mono px-3">${esc(fmtBytes(v.uploading.size))}</td><td class="mono px-3">RC4</td><td></td><td class="px-5 text-right">${badge("warn", "Mengenkripsi RC4")}</td></tr>` : "";
     table = `<table class="w-full border-separate border-spacing-y-1 text-body"><caption class="sr-only">Daftar berkas terenkripsi</caption><thead><tr class="text-left text-caption text-ink2"><th class="px-5 py-2 font-medium">Nama berkas</th><th class="px-3 font-medium">Ukuran</th><th class="px-3 font-medium">Algoritma</th><th class="px-3 font-medium">Diunggah</th><th class="px-5 text-right font-medium">Aksi</th></tr></thead><tbody>${up}${rows}</tbody></table>`;
   }
@@ -509,7 +513,9 @@ function tabCourier() {
     const meta = (res && res.metadata) || {};
     const right = c.state === "checking"
       ? `<section class="card space-y-3 p-6" aria-live="polite"><div class="flex items-center gap-4"><div class="flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-50 text-amber-800">${icon("proses", "h-7 w-7 spin")}</div><div><h2 class="text-h1 text-amber-800">Memeriksa sertifikat</h2><p class="mt-1 text-body">Aplikasi mendekripsi paket dan menghitung ulang hash blok.</p></div></div></section>`
-      : `${resultCard(res)}${res.valid
+      : `${resultCard(res)}${res.valid && res.package_type === "file"
+        ? `<section class="card flex-1 space-y-4 p-6"><h2 class="text-h2">Berkas terlampir</h2><div class="flex items-center gap-3 rounded-2xl bg-muted px-4 py-3.5">${icon("memo", "h-[22px] w-[22px] flex-none text-ink2")}<span class="min-w-0 flex-1"><span class="block break-all font-semibold">${esc(meta.filename)}</span><span class="mono text-ink2">${esc(fmtBytes(meta.size_bytes || 0))}, dikirim ${esc(meta.author || "")}</span></span></div><p class="text-body text-ink2">Berkas sudah didekripsi dan hash-nya cocok dengan sertifikat. Unduh untuk membukanya.</p>${button("primary", "Unduh berkas asli", { icon: "unduh", action: "courier-save-file" })}</section>`
+        : res.valid
         ? `<section class="card flex-1 p-6"><h2 class="text-h2">${esc(meta.title_plain || "Isi dokumen")}</h2><p class="mt-2 whitespace-pre-wrap text-reading">${esc(res.decrypted_content)}</p></section>`
         : `<section class="card p-6"><h2 class="text-h3">Isi dokumen disembunyikan</h2><p class="mt-1 text-body text-ink2">Aplikasi tidak menampilkan isi paket yang gagal verifikasi.</p></section>`}`;
     const cert = (res && res.certificate) || null;
@@ -518,9 +524,9 @@ function tabCourier() {
   const fileBlock = c.file
     ? `<div class="flex items-center gap-3 rounded-2xl bg-muted px-4 py-3.5">${icon("kurir", "h-[22px] w-[22px] flex-none text-ink2")}<span class="mono flex-1 break-all text-[13px]">${esc(c.file.name)}</span><button type="button" class="flex h-11 w-11 flex-none items-center justify-center rounded-xl text-ink2 hover:bg-white" data-action="courier-clear" aria-label="Hapus pilihan berkas">${icon("tutup", "h-5 w-5")}</button></div>`
     : dropzone({ id: "courier-file", zone: "courier", onFile: "courier-file", title: "Seret berkas .vault ke sini, atau pilih dari komputer", body: "Pakai berkas yang Anda terima lewat WA, email, atau flashdisk.", label: "Pilih berkas", accept: ".vault,application/json", drag: c.drag, error: c.fileError ? { title: "Berkas tidak bisa dibuka", body: c.fileError } : null });
-  return `<header class="mb-4"><h1 class="text-h1">Kurir dan verifikasi</h1><p class="mt-1 text-body text-ink2">Buka paket .vault dari staf lain, lalu periksa keaslian sertifikatnya.</p></header>
+  return `<header class="mb-4"><h1 class="text-h1">Kurir dan verifikasi</h1><p class="mt-1 text-body text-ink2">Buka paket .vault berisi memo atau berkas dari staf lain, lalu periksa keaslian sertifikatnya.</p></header>
   <div class="flex flex-col gap-4 lg:flex-row"><form class="card flex min-w-0 flex-1 flex-col gap-5 p-6" data-submit="courier" novalidate><h2 class="text-h2">Impor paket masuk</h2>${fileBlock}${field({ id: "courier-pass", label: "Passphrase bersama", value: c.pass, bind: "courier.pass", secret: true, placeholder: "Masukkan passphrase bersama", help: "Tanyakan passphrase ke pengirim, jangan lewat chat yang sama dengan berkas.", error: c.passError })}${button("primary", c.passError ? "Coba lagi" : "Buka dan verifikasi paket", { icon: "segel", submit: true, cls: "w-full" })}</form>
-  <section class="card flex flex-none items-center justify-center lg:w-[360px]">${c.passError ? statePanel({ ic: "peringatan", tone: "bad", title: "Paket belum terbuka", body: "Aplikasi belum bisa memeriksa sertifikat tanpa passphrase yang benar." }) : statePanel({ ic: "memo", title: "Belum ada paket dibuka", body: "Hasil pemeriksaan sertifikat dan isi dokumen muncul di sini." })}</section></div>`;
+  <section class="card flex flex-none items-center justify-center lg:w-[360px]">${c.passError ? statePanel({ ic: "peringatan", tone: "bad", title: "Paket belum terbuka", body: "Aplikasi belum bisa memeriksa sertifikat tanpa passphrase yang benar." }) : statePanel({ ic: "memo", title: "Belum ada paket dibuka", body: "Hasil pemeriksaan sertifikat dan isi memo atau berkas muncul di sini." })}</section></div>`;
 }
 
 /* ---------- Tab Studio ---------- */
@@ -1169,20 +1175,16 @@ const actions = {
     S.vault.downloading = null;
     render();
   },
-  "vault-download-enc": async (el) => {
+  "vault-send": (el) => {
     const id = isNaN(el.dataset.id) ? el.dataset.id : Number(el.dataset.id);
-    S.vault.downloadingEnc = id;
+    S.dialog = { type: "export", target: "file", id, name: el.dataset.name, pass: "", error: "", busy: false };
     render();
-    try {
-      const res = await request(`/api/attachments/${encodeURIComponent(id)}/download-encrypted`);
-      const name = filenameFrom(res, "berkas.rc4");
-      saveBlob(await res.blob(), name);
-      toast(`Salinan terenkripsi ${el.dataset.name} siap: ${name}. Isinya tidak bisa dibuka di luar AegisVault.`);
-    } catch (err) {
-      toast(err.message, "bad");
-    }
-    S.vault.downloadingEnc = null;
-    render();
+  },
+  "courier-save-file": () => {
+    const res = S.courier.result;
+    const meta = res.metadata || {};
+    const bytes = Uint8Array.from(atob(res.file_b64), (ch) => ch.charCodeAt(0));
+    saveBlob(new Blob([bytes], { type: meta.mime_type || "application/octet-stream" }), meta.filename || "berkas");
   },
   "courier-reset": () => { S.courier = blankCourier(); render({ focusMain: true }); },
   "courier-clear": () => { S.courier.file = null; S.courier.passError = ""; render(); },
@@ -1319,10 +1321,12 @@ const submits = {
     d.error = "";
     render();
     try {
-      const res = await postJson2(`/api/documents/${encodeURIComponent(S.memo.selId)}/export`, { passphrase: d.pass });
-      saveBlob(await res.blob(), filenameFrom(res, `${S.memo.detail.doc_uuid}.vault`));
+      const file = d.target === "file";
+      const url = file ? `/api/attachments/${encodeURIComponent(d.id)}/export` : `/api/documents/${encodeURIComponent(S.memo.selId)}/export`;
+      const res = await postJson2(url, { passphrase: d.pass });
+      saveBlob(await res.blob(), filenameFrom(res, file ? `${d.name}.vault` : `${S.memo.detail.doc_uuid}.vault`));
       S.dialog = null;
-      toast("Paket tersimpan. Kirim berkasnya, lalu sampaikan passphrase lewat jalur lain.");
+      toast(file ? "Paket berkas tersimpan. Kirim lewat WA sebagai dokumen, lalu sampaikan passphrase lewat jalur lain." : "Paket tersimpan. Kirim berkasnya, lalu sampaikan passphrase lewat jalur lain.");
       render();
     } catch (err) {
       d.busy = false;

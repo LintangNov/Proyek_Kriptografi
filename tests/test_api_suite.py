@@ -438,32 +438,88 @@ def test_attachment_roundtrip_encrypted(staff):
     assert d.content == data and "filename*=UTF-8''laporan%20%C3%B1.pdf" in d.headers["content-disposition"]
 
 
-def test_attachment_encrypted_download_is_stored_bytes(staff):
-    client, core, _ = staff
-    data = os.urandom(2048) + b"%PDF-penanda-asli"
-    att = client.post("/api/attachments/upload", files={"file": ("rahasia.pdf", data, "application/pdf")}).json()
-    r = client.get(f"/api/attachments/{att['id']}/download-encrypted")
-    assert r.status_code == 200
-    stored = open(os.path.join(core.paths.attachments, f"{att['att_uuid']}.rc4"), "rb").read()
-    assert r.content == stored and b"%PDF-penanda-asli" not in r.content and len(r.content) == len(data) + 16
-    disposition = r.headers["content-disposition"]
-    assert f"{att['att_uuid']}.rc4" in disposition and "rahasia" not in disposition
-    assert client.get(f"/api/attachments/{att['id']}/download").content == data
+FILE_PASS = "kirim-berkas-aman"
 
 
-def test_attachment_encrypted_download_rules(staff):
-    client, core, _ = staff
-    att = client.post("/api/attachments/upload", files={"file": ("a.bin", b"isi", "application/octet-stream")}).json()
-    url = f"/api/attachments/{att['id']}/download-encrypted"
+def upload_file(client, name="rahasia.pdf", data=None):
+    data = data if data is not None else os.urandom(2048) + b"%PDF-penanda-asli"
+    return client.post("/api/attachments/upload", files={"file": (name, data, "application/pdf")}).json(), data
+
+
+def export_file(client, att, passphrase=FILE_PASS):
+    return client.post(f"/api/attachments/{att['id']}/export", json={"passphrase": passphrase})
+
+
+def test_file_package_opened_by_other_staff(staff):
+    client, _, _ = staff
+    att, data = upload_file(client, name="laporan ñ.pdf")
+    r = export_file(client, att)
+    assert r.status_code == 200 and "laporan%20%C3%B1.pdf.vault" in r.headers["content-disposition"]
+    raw = r.content
+    assert b"%PDF-penanda-asli" not in raw
+    pkg = json.loads(raw)
+    assert pkg["package_type"] == "file" and pkg["metadata"]["filename"] == "laporan ñ.pdf"
+    # Staf lain tidak punya PIN pengirim, cukup kata sandi bersama.
     client.post("/api/auth/logout", json={})
-    assert client.get(url).status_code == 401
     signup(client, username="siti", name="Siti", pin="654321")
     login(client, username="siti", pin="654321")
-    assert client.get(url).status_code == 404
+    res = import_vault(client, raw, passphrase=FILE_PASS)
+    assert res["valid"] is True and res["status"] == "VALID" and res["package_type"] == "file"
+    assert base64.b64decode(res["file_b64"]) == data and res["metadata"]["size_bytes"] == len(data)
+    assert res["certificate"]["doc_uuid"] == att["att_uuid"]
+
+
+def test_file_package_wrong_passphrase_and_tamper(staff):
+    client, _, _ = staff
+    att, _ = upload_file(client)
+    raw = export_file(client, att).content
+    res = import_vault(client, raw, passphrase="kata-sandi-keliru")
+    assert res["valid"] is False and res["status"] == "INVALID_PASSPHRASE_OR_TAMPERED" and res["file_b64"] is None
+    for change in ("payload", "filename", "cert"):
+        pkg = json.loads(raw)
+        if change == "payload":
+            b = bytearray(base64.b64decode(pkg["encrypted_payload"]))
+            b[30] ^= 1
+            pkg["encrypted_payload"] = base64.b64encode(bytes(b)).decode()
+        elif change == "filename":
+            pkg["metadata"]["filename"] = "virus.exe"
+        else:
+            pkg["blockchain_certificate"]["author"] = "penyusup"
+        res = import_vault(client, json.dumps(pkg).encode(), passphrase=FILE_PASS)
+        assert res["valid"] is False and res["file_b64"] is None, change
+
+
+def test_file_package_forged_with_new_passphrase_fails_on_certificate(staff):
+    client, _, _ = staff
+    att, data = upload_file(client)
+    pkg = json.loads(export_file(client, att).content)
+    from backend.blockchain_ledger import package_file_vault
+    block = {**{k: v for k, v in pkg["blockchain_certificate"].items() if k != "block_index"}, "index": pkg["blockchain_certificate"]["block_index"]}
+    block["payload_sha256"] = hashlib.sha256(b"berkas palsu").hexdigest()
+    forged = package_file_vault(att["att_uuid"], pkg["metadata"]["author"], "rahasia.pdf", "application/pdf", b"berkas palsu", "kunci-penyusup", block)
+    res = import_vault(client, json.dumps(forged).encode(), passphrase="kunci-penyusup")
+    assert res["valid"] is False and res["status"] == "TAMPERED_CERTIFICATE"
+
+
+def test_file_package_rules(staff):
+    client, core, _ = staff
+    att, _ = upload_file(client)
+    assert code(export_file(client, att, passphrase="pendek")) == "PASSPHRASE_TOO_SHORT"
+    assert client.get(f"/api/attachments/{att['id']}/download-encrypted").status_code in (404, 405)
+    client.post("/api/auth/logout", json={})
+    assert export_file(client, att).status_code == 401
+    signup(client, username="siti", name="Siti", pin="654321")
+    login(client, username="siti", pin="654321")
+    assert export_file(client, att).status_code == 404
     client.post("/api/auth/logout", json={})
     login(client)
-    os.remove(os.path.join(core.paths.attachments, f"{att['att_uuid']}.rc4"))
-    assert code(client.get(url)) == "FILE_UNREADABLE"
+    path = os.path.join(core.paths.attachments, f"{att['att_uuid']}.rc4")
+    raw = bytearray(open(path, "rb").read())
+    raw[-1] ^= 1
+    open(path, "wb").write(raw)
+    assert code(export_file(client, att)) == "FILE_TAMPERED"
+    os.remove(path)
+    assert code(export_file(client, att)) == "FILE_UNREADABLE"
 
 
 def test_attachment_path_traversal_name_is_flattened(staff):

@@ -5,11 +5,13 @@ Implementasi Buku Besar Rantai Blok Lokal dan Sertifikat Keaslian Dokumen:
 2. Pembuatan dan Validasi Rantai Blok (Genesis Block s.d. Block N)
 3. Pembungkusan Dokumen Terenkripsi (.vault) dengan Sertifikat Blockchain
 4. Verifikasi Integritas dan Anti-Tampering Dokumen Impor Antar-Staf
+5. Paket berkas lampiran (.vault berisi berkas RC4) untuk dikirim ke staf lain
 
 Catatan Kepatuhan Regulasi Kode:
 - Dilarang menggunakan karakter em dash pada seluruh teks, label, dan komentar (Aturan R-02).
 """
 
+import base64
 import hashlib
 import hmac
 import json
@@ -23,6 +25,8 @@ from backend.crypto_engine import (
     derive_keys,
     super_encrypt_text,
     super_decrypt_text,
+    encrypt_file_rc4,
+    decrypt_file_rc4,
 )
 
 POW_DIFFICULTY_PREFIX = "000"
@@ -494,3 +498,125 @@ def import_and_verify_vault(
         "certificate": cert
     }
 
+
+
+# =====================================================================
+# Paket Berkas Lampiran (.vault berisi berkas, untuk dikirim ke staf lain)
+# =====================================================================
+
+FILE_PACKAGE_TYPE = "file"
+FILE_MAC_FIELDS = ("vault_version", "package_type", "export_salt", "metadata", "encrypted_payload", "blockchain_certificate")
+CERT_FIELDS = ("block_index", "timestamp", "doc_uuid", "author", "payload_sha256", "previous_hash", "nonce", "block_hash")
+
+
+def file_package_rc4_key(k1: bytes, k2: bytes) -> bytes:
+    """Kunci RC4 16 byte dari kata sandi bersama, bukan dari PIN pengirim."""
+    return hashlib.sha256(b"AegisVault-File-Package-RC4-v1" + k1 + k2).digest()[:16]
+
+
+def compute_file_package_mac(package: Dict[str, Any], k1: bytes, k2: bytes) -> str:
+    fields = {k: package[k] for k in FILE_MAC_FIELDS}
+    canonical = json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    mac_key = hashlib.sha256(b"AegisVault-Vault-MAC-v1" + k1 + k2).digest()
+    return hmac.new(mac_key, canonical, hashlib.sha256).hexdigest()
+
+
+def package_file_vault(
+    att_uuid: str,
+    author: str,
+    filename: str,
+    mime_type: str,
+    data: bytes,
+    passphrase: str,
+    block: Dict[str, Any],
+    created_at: str | None = None
+) -> Dict[str, Any]:
+    """
+    Membungkus berkas lampiran untuk staf lain.
+    Isi berkas dienkripsi RC4 (nonce acak 16 byte) dengan kunci turunan kata sandi bersama
+    lewat PBKDF2 dan salt acak, lalu seluruh paket diikat HMAC-SHA256.
+    """
+    if not passphrase:
+        raise ValueError("Passphrase pengiriman tidak boleh kosong saat mengekspor paket .vault.")
+    if block["payload_sha256"] != sha256_hex(data):
+        raise ValueError("Hash berkas tidak cocok dengan sertifikat blok blockchain.")
+
+    export_salt = generate_salt(16)
+    k1, k2 = derive_keys(passphrase, export_salt)
+    encrypted = encrypt_file_rc4(data, file_package_rc4_key(k1, k2))
+
+    package = {
+        "vault_version": "1.1",
+        "package_type": FILE_PACKAGE_TYPE,
+        "export_salt": export_salt.hex(),
+        "metadata": {
+            "doc_uuid": att_uuid,
+            "author": author,
+            "filename": filename,
+            "mime_type": mime_type,
+            "size_bytes": len(data),
+            "created_at": created_at or get_current_utc_timestamp(),
+        },
+        "encrypted_payload": base64.b64encode(encrypted).decode("ascii"),
+        "blockchain_certificate": {k: block[k if k != "block_index" else "index"] for k in CERT_FIELDS},
+    }
+    package["integrity_mac"] = compute_file_package_mac(package, k1, k2)
+    return package
+
+
+def _file_result(valid: bool, status: str, message: str, package: Dict[str, Any], data: bytes | None = None) -> Dict[str, Any]:
+    return {
+        "valid": valid,
+        "status": status,
+        "message": message,
+        "package_type": FILE_PACKAGE_TYPE,
+        "decrypted_content": None,
+        "decrypted_file": data,
+        "metadata": package.get("metadata"),
+        "certificate": package.get("blockchain_certificate"),
+    }
+
+
+def import_and_verify_file_vault(
+    package: Dict[str, Any],
+    passphrase: str,
+    local_blockchain: Blockchain | None = None
+) -> Dict[str, Any]:
+    """
+    Membuka paket berkas. HMAC diperiksa lebih dulu, karena RC4 dengan kunci salah tetap
+    menghasilkan byte acak tanpa error. Setelah itu hash berkas, sertifikat, PoW, dan
+    rantai lokal diperiksa seperti paket memo.
+    """
+    for field in FILE_MAC_FIELDS + ("integrity_mac",):
+        if field not in package:
+            return _file_result(False, "INVALID_FORMAT", f"Field wajib '{field}' tidak ditemukan pada paket .vault.", package)
+    cert = package["blockchain_certificate"]
+    if not isinstance(cert, dict) or any(k not in cert for k in CERT_FIELDS):
+        return _file_result(False, "INVALID_FORMAT", "Sertifikat blok pada paket tidak lengkap.", package)
+
+    try:
+        k1, k2 = derive_keys(passphrase, bytes.fromhex(package["export_salt"]))
+        mac_ok = hmac.compare_digest(str(package["integrity_mac"]), compute_file_package_mac(package, k1, k2))
+    except (ValueError, TypeError):
+        return _file_result(False, "INVALID_FORMAT", "Salt atau kode integritas paket rusak.", package)
+    if not mac_ok:
+        return _file_result(False, "INVALID_PASSPHRASE_OR_TAMPERED", "Passphrase salah, atau isi paket berubah setelah diekspor.", package)
+
+    try:
+        data = decrypt_file_rc4(base64.b64decode(package["encrypted_payload"], validate=True), file_package_rc4_key(k1, k2))
+    except (ValueError, TypeError):
+        return _file_result(False, "INVALID_FORMAT", "Isi berkas pada paket rusak.", package)
+
+    if sha256_hex(data).lower() != str(cert["payload_sha256"]).lower():
+        return _file_result(False, "TAMPERED_CONTENT", "Hash berkas hasil dekripsi tidak cocok dengan sertifikat.", package)
+    recomputed = compute_block_hash(cert["block_index"], cert["timestamp"], cert["doc_uuid"], cert["author"], cert["payload_sha256"], cert["previous_hash"], cert["nonce"])
+    if recomputed != cert["block_hash"] or not cert["block_hash"].startswith(POW_DIFFICULTY_PREFIX):
+        return _file_result(False, "TAMPERED_CERTIFICATE", "Sertifikat blok tidak valid atau tidak memenuhi Proof-of-Work.", package)
+    meta = package["metadata"]
+    if not isinstance(meta, dict) or meta.get("doc_uuid") != cert["doc_uuid"] or meta.get("author") != cert["author"]:
+        return _file_result(False, "TAMPERED_CERTIFICATE", "Metadata paket berbeda dari sertifikat.", package)
+    if local_blockchain is not None:
+        local_block = local_blockchain.get_block_by_doc_uuid(cert["doc_uuid"])
+        if local_block is not None and local_block["block_hash"] != cert["block_hash"]:
+            return _file_result(False, "TAMPERED_CHAIN", "Berkas dengan UUID ini ada di rantai lokal, tetapi hash bloknya berbeda.", package)
+    return _file_result(True, "VALID", "SERTIFIKAT BLOCKCHAIN VALID: BERKAS ASLI & BELUM DIMODIFIKASI", package, data)

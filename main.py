@@ -51,7 +51,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from backend import biometric_auth as biometric
 from backend import config
-from backend.blockchain_ledger import Blockchain, import_and_verify_vault, package_vault_file
+from backend.blockchain_ledger import Blockchain, import_and_verify_vault, package_vault_file, import_and_verify_file_vault, package_file_vault
 from backend.crypto_engine import (
     decrypt_file_rc4,
     derive_keys,
@@ -73,7 +73,8 @@ HOST = "127.0.0.1"
 SESSION_COOKIE = "aegis_session"
 MIN_PIN_LENGTH = 6
 MIN_PASSPHRASE_LENGTH = 8
-MAX_VAULT_BYTES = 5 * 1024 * 1024
+# Paket berkas memuat berkas sampai 20 MB dalam Base64, jadi batasnya di atas 4/3 kali itu.
+MAX_VAULT_BYTES = 32 * 1024 * 1024
 MAX_IMAGE_BYTES = config.MAX_ATTACHMENT_BYTES
 USERNAME_HELP = "Pakai huruf, angka, titik, garis bawah, atau tanda hubung, tanpa spasi."
 CSP = (
@@ -606,6 +607,17 @@ def create_app(storage_dir: Optional[str] = None, test_mode: Optional[bool] = No
             return invalid
         if not passphrase:
             fail(422, "PASSPHRASE_REQUIRED", "Isi passphrase bersama.")
+        if package.get("package_type") == "file":
+            with core.chain_lock:
+                core.reload_chain()
+                try:
+                    result = import_and_verify_file_vault(package, passphrase, local_blockchain=core.ledger)
+                except (KeyError, TypeError, ValueError, AttributeError):
+                    return invalid
+            data = result.pop("decrypted_file")
+            # Berkas asli hanya dikirim balik kalau seluruh pemeriksaan lolos.
+            result["file_b64"] = base64.b64encode(data).decode("ascii") if result["valid"] and data is not None else None
+            return result
         with core.chain_lock:
             core.reload_chain()
             try:
@@ -662,19 +674,26 @@ def create_app(storage_dir: Optional[str] = None, test_mode: Optional[bool] = No
             fail(409, "FILE_TAMPERED", "Berkas berubah setelah disimpan, jadi aplikasi menolak mengembalikannya.")
         return Response(data, media_type="application/octet-stream", headers=attachment_headers(row["original_filename_enc"]))
 
-    @app.get("/api/attachments/{att_id}/download-encrypted")
-    def download_attachment_encrypted(att_id: int, aegis_session: Optional[str] = Cookie(default=None)):
+    @app.post("/api/attachments/{att_id}/export")
+    def export_attachment(att_id: int, body: ExportBody, aegis_session: Optional[str] = Cookie(default=None)):
         session = core.require_session(aegis_session)
+        if len(body.passphrase) < MIN_PASSPHRASE_LENGTH:
+            fail(422, "PASSPHRASE_TOO_SHORT", f"Passphrase minimal {MIN_PASSPHRASE_LENGTH} karakter.")
         row = core.db.get_attachment_by_id(att_id)
         if not row or row["owner_username"] != session.username:
             fail(404, "NOT_FOUND", "Berkas tidak ditemukan.")
         try:
             with open(row["encrypted_filepath"], "rb") as f:
-                data = f.read()
-        except OSError:
+                data = decrypt_file_rc4(f.read(), session.rc4_key)
+        except (OSError, ValueError):
             fail(409, "FILE_UNREADABLE", "Berkas terenkripsi hilang atau rusak.")
-        # Nama UUID, supaya nama asli berkas tidak ikut terbaca saat salinan ini berpindah.
-        return Response(data, media_type="application/octet-stream", headers=attachment_headers(f"{row['att_uuid']}.rc4"))
+        if sha256_hex(data) != row["original_sha256"]:
+            fail(409, "FILE_TAMPERED", "Berkas berubah setelah disimpan, jadi aplikasi menolak mengirimnya.")
+        block = core.block_of(row["att_uuid"])
+        if not block or block["block_hash"] != row["block_hash"] or block["payload_sha256"] != row["original_sha256"]:
+            fail(409, "BLOCK_MISMATCH", "Segel berkas ini tidak cocok dengan rantai blok, jadi paket tidak bisa dibuat.")
+        package = package_file_vault(row["att_uuid"], session.username, row["original_filename_enc"], row["mime_type_enc"] or "application/octet-stream", data, body.passphrase, block, row["created_at"])
+        return Response(json.dumps(package, ensure_ascii=False).encode("utf-8"), media_type="application/json", headers=attachment_headers(f"{row['original_filename_enc']}.vault"))
 
     # ---------- Steganografi ----------
 

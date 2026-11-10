@@ -34,11 +34,11 @@ Frontend butuh endpoint ini, dan semuanya sudah ada di `main.py`.
 | `GET /api/documents/{id}` | | data daftar ditambah `content`, `nonce`, `timestamp`, `verified` |
 | `GET /api/documents/{id}/ciphertext` | | `{plaintext, vigenere_ciphertext_hex, aes_iv_hex, final_ciphertext_b64}` |
 | `POST /api/documents/{id}/export` | `{passphrase}` | berkas `.vault`, nama pada `Content-Disposition` |
-| `POST /api/documents/import-verify` | multipart `file`, `passphrase` | hasil `import_and_verify_vault` |
+| `POST /api/documents/import-verify` | multipart `file`, `passphrase` | hasil `import_and_verify_vault`. Untuk paket berkas: hasil `import_and_verify_file_vault` ditambah `package_type: "file"` dan `file_b64` (isi berkas asli, hanya kalau `valid`) |
 | `GET /api/attachments` | | `[{id, filename, size_bytes, created_at}]` |
 | `POST /api/attachments/upload` | multipart `file` | `{id, ...}` |
 | `GET /api/attachments/{id}/download` | | berkas asli, nama pada `Content-Disposition` |
-| `GET /api/attachments/{id}/download-encrypted` | | isi file `.rc4` apa adanya (nonce + ciphertext), bernama `ATT-xxx.rc4` |
+| `POST /api/attachments/{id}/export` | `{passphrase}` | paket `.vault` berisi berkas (`package_type: "file"`), bernama `<nama asli>.vault` |
 | `POST /api/stego/capacity` | multipart `image` | `{format, extension, mime, capacity_bytes, width, height, method}`, `method` bernilai `lsb` atau `dct` (JPEG) |
 | `POST /api/stego/embed` | multipart `image`, `message`, `passphrase` opsional | berkas berformat sama dengan aslinya, nama sama pada `Content-Disposition`, dengan header `X-Stego-Report`: `{channels_changed, channels_total, max_channel_diff, psnr_db, method, format}`, ditambah `coefficients_changed` dan `coefficients_used` untuk JPEG |
 | `POST /api/stego/extract` | multipart `image`, `passphrase` opsional | `{message}` |

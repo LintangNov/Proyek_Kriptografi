@@ -257,6 +257,26 @@ Saat staf mengekspor memo untuk dikirim ke staf lain, aplikasi menghasilkan file
      * Jika blok dengan `doc_uuid` tersebut ada di rantai blok lokal instansi, pastikan `block_hash`-nya identik dengan catatan di `blockchain.json`.
   5. Hitung ulang `integrity_mac`. Tanpa passphrase, judul, kategori, pengirim, dan sertifikat tidak bisa diubah tanpa terdeteksi (status `TAMPERED_PACKAGE`). Pemegang passphrase tetap bisa membuat paket baru, karena kunci ini dibagi bersama dan bukan tanda tangan digital.
 
+#### C. Paket Berkas Lampiran (`package_type: "file"`)
+Berkas di Brankas dienkripsi dengan kunci RC4 dari PIN pemiliknya, jadi salinan `.rc4` tidak bisa dibuka staf lain. Untuk berbagi, menu **Kirim ke staf lain** membuat paket `.vault` dengan kunci dari passphrase bersama, sehingga PIN pengirim tidak pernah dibagikan.
+
+```json
+{
+  "vault_version": "1.1",
+  "package_type": "file",
+  "export_salt": "<16-byte-hex-salt>",
+  "metadata": {"doc_uuid": "ATT-...", "author": "staf_budi", "filename": "laporan.pdf", "mime_type": "application/pdf", "size_bytes": 2516582, "created_at": "..."},
+  "encrypted_payload": "<Base64(file_nonce 16 byte || ciphertext RC4)>",
+  "blockchain_certificate": {"block_index": 2, "...": "sama dengan paket memo"},
+  "integrity_mac": "<HMAC-SHA256>"
+}
+```
+
+* **Kunci:** $(K_1, K_2) = \text{PBKDF2}(\text{SharedPassphrase}, \text{export\_salt})$, lalu $K_{\text{paket}} = \text{SHA256}(\texttt{"AegisVault-File-Package-RC4-v1"} \parallel K_1 \parallel K_2)[0..15]$. Kunci efektif RC4 sama dengan berkas brankas: $K_{\text{paket}} \parallel \text{file\_nonce}$.
+* **HMAC:** kunci $\text{SHA256}(\texttt{"AegisVault-Vault-MAC-v1"} \parallel K_1 \parallel K_2)$ atas `vault_version`, `package_type`, `export_salt`, `metadata`, `encrypted_payload`, dan `blockchain_certificate`.
+* **Urutan verifikasi:** HMAC diperiksa lebih dulu, karena RC4 dengan kunci salah tetap menghasilkan byte acak tanpa error. HMAC yang tidak cocok berarti passphrase salah atau paket diubah (`INVALID_PASSPHRASE_OR_TAMPERED`). Setelah itu berkas didekripsi, lalu hash berkas, hash blok, Proof-of-Work, kecocokan metadata, dan rantai lokal diperiksa seperti paket memo.
+* **Bukti berkas tersimpan terenkripsi:** buka `%LOCALAPPDATA%\AegisVault\storage\attachments`. Setiap berkas tersimpan sebagai `ATT-xxxx.rc4` dengan isi acak, tanpa nama atau isi asli.
+
 ---
 
 ## 4. Kontrak REST API Lokal (`main.py` — FastAPI)
@@ -278,7 +298,7 @@ Saat staf mengekspor memo untuk dikirim ke staf lain, aplikasi menghasilkan file
 | `GET` | `/api/attachments` | Mengambil daftar berkas di dalam Brankas File (RC4 Vault). |
 | `POST` | `/api/attachments/upload` | Mengunggah berkas, mengenkripsinya dengan RC4 Stream Cipher, dan mencatat sertifikatnya ke Blockchain. |
 | `GET` | `/api/attachments/{id}/download` | Mendekripsi berkas `.rc4` dan mengunduhnya kembali ke format berkas asli. |
-| `GET` | `/api/attachments/{id}/download-encrypted` | Mengunduh berkas `.rc4` apa adanya tanpa dekripsi. |
+| `POST` | `/api/attachments/{id}/export` | Membungkus berkas menjadi paket `.vault` berkunci passphrase bersama untuk dikirim ke staf lain. |
 | `POST` | `/api/stego/capacity` | Menerima file gambar dan mengembalikan format serta kapasitas pesan dalam byte. |
 | `POST` | `/api/stego/embed` | Menerima file gambar, pesan rahasia, dan passphrase opsional, lalu mengembalikan gambar berformat sama dengan aslinya (PNG, JPEG, BMP, TIFF, atau WebP). |
 | `POST` | `/api/stego/extract` | Menerima gambar steganografi berformat PNG, JPEG, BMP, TIFF, atau WebP dan mengekstrak pesan rahasia di dalamnya. |
