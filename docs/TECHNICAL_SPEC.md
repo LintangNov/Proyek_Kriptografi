@@ -72,6 +72,7 @@ Nilai `salt` (dalam hex) dan `PasswordHash` (dalam hex) disimpan ke tabel `users
    * Area wajah yang terdeteksi di-*crop*, diubah ke *grayscale*, di-*resize* ke ukuran standar $128 \times 128$ piksel, dan dinormalisasi dengan `cv2.equalizeHist()`.
    * Saat registrasi, matriks wajah disimpan sebagai file terenkripsi/biner di `storage/faces/{username}.npy`.
    * Saat login, sistem membandingkan wajah baru dengan wajah terdaftar menggunakan kombinasi **Normalized Cross-Correlation (`cv2.matchTemplate`)** dan **Histogram Comparison (`cv2.compareHist`)**. Jika skor kemiripan $\ge 0.72$, verifikasi biometrik dinyatakan berhasil.
+   * Sebelum dibandingkan, kedua wajah diberi masker elips (setengah lebar $0.42$, setengah tinggi $0.50$ dari sisi kotak). Pojok kotak deteksi berisi latar, rambut, atau telinga, jadi tidak ikut dihitung. Perataan histogram diulang hanya dari piksel di dalam elips, supaya terang-gelap latar tidak menggeser nilai piksel wajah. Wajah yang sudah terdaftar tidak perlu didaftarkan ulang.
 
 ### 3.3 Modul 3: Super Enkripsi Teks Memo (`backend/crypto_engine.py`)
 Menggabungkan algoritma klasik **Extended Vigenère Cipher (256 ASCII)** dan algoritma modern **AES-128 Mode CBC**.

@@ -43,6 +43,10 @@ class DatabaseIntegrityError(Exception):
     """File database berubah dari luar aplikasi, checksum hilang, atau field tidak terdekripsi."""
 
 
+class DatabaseBusyError(Exception):
+    """File database sedang dikunci program lain, misalnya penampil SQLite yang masih terbuka."""
+
+
 class DuplicateRecordError(ValueError):
     """Data dengan kunci unik yang sama (username, doc_uuid, att_uuid) sudah ada."""
 
@@ -303,6 +307,22 @@ class Database:
             with contextlib.closing(self._connect()) as conn:
                 return conn.execute(sql, params).fetchall()
 
+    def assert_writable(self, timeout: float = 2.0) -> None:
+        """
+        Memastikan database bisa ditulis sebelum langkah yang tidak bisa dibatalkan, seperti
+        menambang blok. BEGIN EXCLUSIVE gagal kalau program lain masih membuka database,
+        bahkan hanya untuk membaca.
+        """
+        with self._lock:
+            conn = sqlite3.connect(self.paths.db, timeout=timeout)
+            try:
+                conn.execute("BEGIN EXCLUSIVE")
+                conn.rollback()
+            except sqlite3.OperationalError as exc:
+                raise DatabaseBusyError(str(exc)) from exc
+            finally:
+                conn.close()
+
     def _write(self, sql: str, params: tuple = ()) -> int:
         """Menjalankan satu INSERT/DELETE, lalu memperbarui checksum. Mengembalikan rowcount."""
         with self._lock:
@@ -314,6 +334,10 @@ class Database:
                     affected = cursor.rowcount
             except sqlite3.IntegrityError as exc:
                 raise DuplicateRecordError(str(exc)) from exc
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc) or "busy" in str(exc):
+                    raise DatabaseBusyError(str(exc)) from exc
+                raise
             self.update_checksum()
             return affected
 

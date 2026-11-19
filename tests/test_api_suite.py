@@ -899,3 +899,43 @@ def test_mock_hidden_outside_test_mode(env, tmp_path, monkeypatch):
 ])
 def test_download_keeps_original_extension(chosen, suggested, expected):
     assert main.with_original_extension(chosen, suggested) == expected
+
+
+# ---------- Database dibuka program lain ----------
+
+def chain_length(core):
+    return len(json.load(open(core.paths.blockchain, encoding="utf-8")))
+
+
+def test_memo_rejected_without_new_block_while_db_viewer_open(staff):
+    client, core, _ = staff
+    before = chain_length(core)
+    viewer = sqlite3.connect(core.paths.db, timeout=0)
+    viewer.execute("BEGIN")
+    viewer.execute("SELECT count(*) FROM users").fetchall()  # seperti DB Browser yang membuka tabel
+    try:
+        r = client.post("/api/documents", json={"title": "Uji", "category": "Rahasia", "content": "isi"})
+        assert r.status_code == 409 and code(r) == "DB_BUSY"
+        up = client.post("/api/attachments/upload", files={"file": ("a.txt", b"isi", "text/plain")})
+        assert code(up) == "DB_BUSY"
+    finally:
+        viewer.rollback()
+        viewer.close()
+    assert chain_length(core) == before and core.db.get_raw_rows("documents") == []
+    assert os.listdir(core.paths.attachments) == []
+    # Setelah penampil ditutup, menyimpan berjalan normal dan rantai tetap valid.
+    assert client.post("/api/documents", json={"title": "Uji", "category": "Rahasia", "content": "isi"}).status_code == 200
+    assert chain_length(core) == before + 1
+    assert client.get("/api/blockchain/audit").json()["chain_valid"] is True
+
+
+def test_block_rolled_back_when_save_fails_after_mining(staff, monkeypatch):
+    client, core, _ = staff
+    before = chain_length(core)
+    def broken(*_args, **_kwargs):
+        raise main.DatabaseBusyError("database is locked")
+    monkeypatch.setattr(core.db, "insert_document", broken)
+    r = client.post("/api/documents", json={"title": "Uji", "category": "Rahasia", "content": "isi"})
+    assert code(r) == "DB_BUSY" and chain_length(core) == before
+    monkeypatch.undo()
+    assert client.get("/api/blockchain/audit").json()["chain_valid"] is True

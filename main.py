@@ -63,7 +63,7 @@ from backend.crypto_engine import (
     verify_password,
     vigenere_256_encrypt,
 )
-from backend.database import Database, DatabaseIntegrityError, DuplicateRecordError
+from backend.database import Database, DatabaseBusyError, DatabaseIntegrityError, DuplicateRecordError
 from backend.dongle_guard import DongleError, DongleGuard, DongleMonitor, MultipleDrivesError
 from backend.stego_engine import SUPPORTED_FORMATS, capacity_info, embed_file, extract_message_from_image
 
@@ -293,6 +293,8 @@ class Core:
     def seal(self, doc_uuid: str, author: str, asset_type: str, payload_sha256: str) -> Dict[str, Any]:
         with self.chain_lock:
             self.db.assert_integrity()
+            # Blok tidak bisa ditarik setelah tersebar, jadi database dipastikan bisa ditulis lebih dulu.
+            self.db.assert_writable()
             ok, message = self.check_chain()
             if not ok:
                 fail(409, "CHAIN_INVALID", f"Rantai blok tidak valid, jadi aplikasi menolak menyegel data baru. {message}")
@@ -319,6 +321,14 @@ class Core:
             fail(422, "INVALID_IMAGE", "Gambar tidak bisa dibaca. Ambil gambar lagi.")
         if not result["match"]:
             fail(401, "FACE_MISMATCH", "Wajah tidak cocok.")
+
+    def unseal(self, block: Dict[str, Any]) -> None:
+        """Menarik blok terakhir kalau datanya gagal disimpan, supaya rantai tidak berisi blok tanpa data."""
+        with self.chain_lock:
+            if self.ledger.chain and self.ledger.chain[-1]["block_hash"] == block["block_hash"]:
+                self.ledger.chain.pop()
+                self.ledger.save_chain()
+                self.sign_chain()
 
     def block_of(self, doc_uuid: str) -> Optional[Dict[str, Any]]:
         with self.chain_lock:
@@ -387,6 +397,10 @@ def create_app(storage_dir: Optional[str] = None, test_mode: Optional[bool] = No
 
     # Dipasang terakhir agar berjalan paling awal, sekaligus mencegah DNS rebinding.
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[HOST, "localhost"])
+
+    @app.exception_handler(DatabaseBusyError)
+    async def on_db_busy(_request: Request, _exc: DatabaseBusyError):
+        return JSONResponse(status_code=409, content={"detail": {"code": "DB_BUSY", "message": "Database sedang dibuka program lain, misalnya DB Browser for SQLite. Tutup program itu, lalu coba lagi. Tidak ada blok yang ditambahkan."}})
 
     @app.exception_handler(DatabaseIntegrityError)
     async def on_db_integrity(_request: Request, _exc: DatabaseIntegrityError):
@@ -549,7 +563,11 @@ def create_app(storage_dir: Optional[str] = None, test_mode: Optional[bool] = No
         ciphertext = super_encrypt_text(body.content, session.k1, session.k2)
         with core.chain_lock:
             block = core.seal(doc_uuid, session.username, "MEMO_TEXT", digest)
-            doc_id = core.db.insert_document(doc_uuid, session.username, title, category, ciphertext, digest, block["index"], block["block_hash"])
+            try:
+                doc_id = core.db.insert_document(doc_uuid, session.username, title, category, ciphertext, digest, block["index"], block["block_hash"])
+            except Exception:
+                core.unseal(block)
+                raise
         return memo_public(core.db.get_document_by_id(doc_id))
 
     @app.get("/api/documents/{doc_id}")
@@ -654,9 +672,15 @@ def create_app(storage_dir: Optional[str] = None, test_mode: Optional[bool] = No
         path = os.path.join(core.paths.attachments, f"{att_uuid}.rc4")
         with core.chain_lock:
             block = core.seal(att_uuid, session.username, "FILE_ATTACHMENT", digest)
-            with open(path, "wb") as f:
-                f.write(encrypted)
-            att_id = core.db.insert_attachment(att_uuid, session.username, filename, file.content_type or "application/octet-stream", path, len(data), digest, block["index"], block["block_hash"])
+            try:
+                with open(path, "wb") as f:
+                    f.write(encrypted)
+                att_id = core.db.insert_attachment(att_uuid, session.username, filename, file.content_type or "application/octet-stream", path, len(data), digest, block["index"], block["block_hash"])
+            except Exception:
+                core.unseal(block)
+                if os.path.exists(path):
+                    os.remove(path)
+                raise
         return attachment_public(core.db.get_attachment_by_id(att_id))
 
     @app.get("/api/attachments/{att_id}/download")

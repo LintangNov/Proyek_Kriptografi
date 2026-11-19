@@ -10,6 +10,8 @@ Implementasi docs/TECHNICAL_SPEC.md Bab 3.2 B.
    - Penyimpanan: matriks 128x128 uint8 di storage/faces/{username}.npy
    - Pencocokan: kombinasi Normalized Cross-Correlation (cv2.matchTemplate) dan
      Histogram Comparison (cv2.compareHist). Cocok jika skor >= 0.72.
+   - Masker elips: saat dibandingkan, hanya bagian dalam wajah yang dihitung. Pojok
+     kotak deteksi berisi latar, rambut, atau telinga, yang berubah saat pindah tempat.
 
 Rumus skor kemiripan:
     score = 0.6 * NCC + 0.4 * HIST, masing-masing dibatasi ke [0, 1]
@@ -42,6 +44,9 @@ NCC_WEIGHT = 0.6
 HIST_WEIGHT = 0.4
 HIST_GRID = 4
 HIST_BINS = 32
+# Elips bagian dalam wajah pada kotak 128x128: setengah lebar 0.42, setengah tinggi 0.50.
+MASK_SEMI_WIDTH = 0.42
+MASK_SEMI_HEIGHT = 0.50
 CASCADE_FILENAME = "haarcascade_frontalface_default.xml"
 
 MODE_FINGERPRINT = "FINGERPRINT"
@@ -208,14 +213,44 @@ def extract_face_from_base64(frame_b64: str) -> np.ndarray:
 # 3. Pencocokan wajah: NCC + Histogram
 # =====================================================================
 
+def _face_mask() -> np.ndarray:
+    """Masker uint8 (255 = dihitung) berbentuk elips di tengah kotak wajah."""
+    yy, xx = np.mgrid[0:FACE_SIZE, 0:FACE_SIZE]
+    center = (FACE_SIZE - 1) / 2
+    inside = ((xx - center) / (FACE_SIZE * MASK_SEMI_WIDTH)) ** 2 + ((yy - center) / (FACE_SIZE * MASK_SEMI_HEIGHT)) ** 2 <= 1
+    return np.where(inside, 255, 0).astype(np.uint8)
+
+
+FACE_MASK = _face_mask()
+_INSIDE = FACE_MASK > 0
+
+
+def _equalize_inside(face: np.ndarray) -> np.ndarray:
+    """
+    Meratakan histogram hanya dari piksel di dalam elips, supaya terang-gelap latar
+    tidak ikut menggeser nilai piksel wajah. Piksel di luar elips menjadi 0.
+    """
+    values = face[_INSIDE]
+    cdf = np.cumsum(np.bincount(values, minlength=256))
+    cdf_min = cdf[cdf > 0][0]
+    out = np.zeros_like(face)
+    if cdf[-1] == cdf_min:  # wajah seragam: tidak ada yang bisa diratakan
+        out[_INSIDE] = values
+        return out
+    lut = np.clip(np.round((cdf - cdf_min) / (cdf[-1] - cdf_min) * 255), 0, 255).astype(np.uint8)
+    out[_INSIDE] = lut[values]
+    return out
+
+
 def _grid_histogram(face: np.ndarray) -> np.ndarray:
-    """Histogram 32 bin per sel pada grid 4x4, dinormalisasi, digabung menjadi satu vektor."""
+    """Histogram 32 bin per sel pada grid 4x4 (hanya piksel di dalam elips), dinormalisasi, digabung menjadi satu vektor."""
     cell = FACE_SIZE // HIST_GRID
     parts: List[np.ndarray] = []
     for row in range(HIST_GRID):
         for col in range(HIST_GRID):
             patch = face[row * cell:(row + 1) * cell, col * cell:(col + 1) * cell]
-            hist = cv2.calcHist([patch], [0], None, [HIST_BINS], [0, 256])
+            patch_mask = FACE_MASK[row * cell:(row + 1) * cell, col * cell:(col + 1) * cell]
+            hist = cv2.calcHist([patch], [0], patch_mask, [HIST_BINS], [0, 256])
             cv2.normalize(hist, hist, alpha=1.0, beta=0.0, norm_type=cv2.NORM_L1)
             parts.append(hist)
     return np.concatenate(parts, axis=0).astype(np.float32)
@@ -230,7 +265,10 @@ def compute_similarity(face_a: np.ndarray, face_b: np.ndarray) -> Dict[str, floa
         if face.shape != (FACE_SIZE, FACE_SIZE) or face.dtype != np.uint8:
             raise ValueError(f"Matriks wajah wajib {FACE_SIZE}x{FACE_SIZE} bertipe uint8.")
 
-    ncc_raw = float(cv2.matchTemplate(face_a, face_b, cv2.TM_CCOEFF_NORMED)[0][0])
+    face_a, face_b = _equalize_inside(face_a), _equalize_inside(face_b)
+    # Luar elips diisi rata-rata dalam elips, jadi simpangannya nol dan tidak ikut dihitung NCC.
+    ncc_a, ncc_b = (np.where(_INSIDE, f, f[_INSIDE].mean()).astype(np.float32) for f in (face_a, face_b))
+    ncc_raw = float(cv2.matchTemplate(ncc_a, ncc_b, cv2.TM_CCOEFF_NORMED)[0][0])
     if not np.isfinite(ncc_raw):  # citra seragam: varians nol
         ncc_raw = 0.0
     ncc = min(1.0, max(0.0, ncc_raw))

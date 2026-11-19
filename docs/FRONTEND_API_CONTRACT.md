@@ -55,6 +55,7 @@ Frontend butuh endpoint ini, dan semuanya sudah ada di `main.py`.
 | `DONGLE_LOCKED` | daftar dongle | Pendaftaran tanpa login ditolak, tampilkan "Ganti dongle" |
 | `NO_STAFF` | ganti dongle | Belum ada staf, kembali ke layar dongle dan minta dongle terdaftar |
 | `DB_TAMPERED` | semua data | Layar "Database berubah" dengan tombol pulihkan |
+| `DB_BUSY` | simpan memo, unggah berkas | Database sedang dibuka program lain. Blok tidak ditambang, atau ditarik lagi kalau penyimpanan gagal |
 | `FACE_MISMATCH` | login | Layar akses ditolak |
 | `NO_FACE` | login, registrasi | Minta ambil gambar ulang |
 | `FACE_NOT_ENROLLED` | login | Minta daftar ulang |
